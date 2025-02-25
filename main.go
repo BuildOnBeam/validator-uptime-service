@@ -4,7 +4,9 @@ import (
 	"log"
 	"time"
 
+	"uptime-service/aggregator"
 	"uptime-service/config"
+	"uptime-service/errutil"
 	"uptime-service/logging"
 	"uptime-service/validator"
 )
@@ -17,20 +19,41 @@ func main() {
 
 	logging.SetLevel(cfg.LogLevel)
 
+	aggClient := &aggregator.AggregatorClient{
+		BaseURL:          cfg.AggregatorURL,
+		SigningSubnetID:  cfg.SigningSubnetID,
+		QuorumPercentage: cfg.QuorumPercentage,
+	}
+
 	logging.Info("Starting uptime-service loop...")
 	for {
 		// 1. Fetch current validators and their uptime from Avalanche P-Chain
 		validators, err := validator.FetchUptimes(cfg.AvalancheAPI)
 		if err != nil {
-			// If we can't fetch validator info, log and retry next day.
 			logging.Errorf("Error fetching validator uptimes: %v", err)
 		} else {
 			logging.Infof("Fetched %d validators' uptime info", len(validators))
+			// 2. For each validator, build message, aggregate signatures, and submit proof
 			for _, val := range validators {
-				logging.Infof("Validator: %v", val)
+				// Build the unsigned uptime message for this validator
+				msgBytes, err := aggClient.PackValidationUptimeMessage(val.ValidationID, val.UptimeSeconds)
+				if errutil.HandleError("building uptime message for "+val.NodeID, err) {
+					continue // skip this validator on error
+				}
+				logging.Infof("Built uptime message for validator %s (uptime=%d seconds)", val.NodeID, val.UptimeSeconds)
+
+				// 3. Submit to signature-aggregator service to get aggregated signature
+				signedMsg, err := aggClient.SubmitAggregateRequest(msgBytes)
+				if errutil.HandleError("aggregating signature for "+val.NodeID, err) {
+					continue
+				}
+				logging.Infof("Received aggregated signature for validator %s", val.NodeID)
+				logging.Infof("signedmsg: %v", signedMsg)
+
 			}
 		}
 
+		// 5. Sleep until the next day (24 hours).
 		logging.Info("Uptime proof cycle completed. Sleeping for 24 hours...")
 		time.Sleep(24 * time.Hour)
 	}

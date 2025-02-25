@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/mr-tron/base58/base58"
@@ -14,6 +18,17 @@ type AggregatorClient struct {
 	BaseURL          string
 	SigningSubnetID  string
 	QuorumPercentage int
+}
+
+type AggregatorRequest struct {
+	Message         string `json:"message,omitempty"`
+	Justification   string `json:"justification,omitempty"` // optional justification bytes? what is this
+	SigningSubnetID string `json:"signing-subnet-id,omitempty"`
+	QuorumPercent   int    `json:"quorum-percentage,omitempty"`
+}
+
+type AggregatorResponse struct {
+	SignedMessage string `json:"signed-message"`
 }
 
 // TODO: REALLY HAVE TO CHECK THIS LOL
@@ -63,4 +78,49 @@ func (c *AggregatorClient) PackValidationUptimeMessage(validationID string, upti
 	binary.BigEndian.PutUint64(msg[38:46], uptimeSeconds)
 
 	return msg, nil
+}
+
+func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage []byte) ([]byte, error) {
+	req := AggregatorRequest{
+		Message: hex.EncodeToString(unsignedMessage),
+	}
+	if c.SigningSubnetID != "" {
+		req.SigningSubnetID = c.SigningSubnetID
+	}
+	if c.QuorumPercentage > 0 {
+		req.QuorumPercent = c.QuorumPercentage
+	}
+	reqData, _ := json.Marshal(req)
+
+	resp, err := http.Post(c.BaseURL+"/v1/signatureAggregator/fuji/aggregateSignatures", "application/json", bytes.NewReader(reqData))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Error != "" {
+			return nil, errors.New("aggregator error: " + errResp.Error)
+		}
+		return nil, errors.New("aggregator request failed with status code: " + resp.Status)
+	}
+
+	var aggResp AggregatorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&aggResp); err != nil {
+		return nil, err
+	}
+
+	signedHex := aggResp.SignedMessage
+	if strings.HasPrefix(signedHex, "0x") {
+		signedHex = signedHex[2:]
+	}
+	signedBytes, err := hex.DecodeString(signedHex)
+	if err != nil {
+		return nil, errors.New("invalid hex in signed-message: " + err.Error())
+	}
+	return signedBytes, nil
 }
