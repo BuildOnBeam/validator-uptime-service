@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -81,6 +83,8 @@ func (c *AggregatorClient) PackValidationUptimeMessage(validationID string, upti
 }
 
 func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage []byte) ([]byte, error) {
+	log.Printf("Submitting aggregate request with message length: %d bytes", len(unsignedMessage))
+
 	req := AggregatorRequest{
 		Message: hex.EncodeToString(unsignedMessage),
 	}
@@ -90,28 +94,36 @@ func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage []byte) ([]byt
 	if c.QuorumPercentage > 0 {
 		req.QuorumPercent = c.QuorumPercentage
 	}
-	reqData, _ := json.Marshal(req)
+
+	reqData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	log.Printf("Request payload: %s", string(reqData))
+	log.Printf("Sending request to: %s", c.BaseURL+"/v1/signatureAggregator/fuji/aggregateSignatures")
 
 	resp, err := http.Post(c.BaseURL+"/v1/signatureAggregator/fuji/aggregateSignatures", "application/json", bytes.NewReader(reqData))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	log.Printf("Response status: %d, body: %s", resp.StatusCode, string(body))
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp struct {
 			Error string `json:"error"`
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Error != "" {
+		if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
 			return nil, errors.New("aggregator error: " + errResp.Error)
 		}
-		return nil, errors.New("aggregator request failed with status code: " + resp.Status)
+		return nil, fmt.Errorf("aggregator request failed with status code: %s, body: %s", resp.Status, string(body))
 	}
 
 	var aggResp AggregatorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&aggResp); err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &aggResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	signedHex := aggResp.SignedMessage
@@ -120,7 +132,9 @@ func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage []byte) ([]byt
 	}
 	signedBytes, err := hex.DecodeString(signedHex)
 	if err != nil {
-		return nil, errors.New("invalid hex in signed-message: " + err.Error())
+		return nil, fmt.Errorf("invalid hex in signed-message: %w", err)
 	}
+	log.Printf("Successfully decoded signed message of length: %d bytes", len(signedBytes))
+
 	return signedBytes, nil
 }
