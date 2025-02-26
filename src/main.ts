@@ -50,11 +50,10 @@ async function main(): Promise<void> {
             // 3. Submit to signature-aggregator service to get aggregated signature
             const signedMsg = await aggClient.submitAggregateRequest(msgBytes);
             logging.infof("Received aggregated signature for validator %s", val.nodeId);
-            logging.infof("signedmsg: %s", signedMsg.toString('hex'));
             
-            // // 4. Submit the signed uptime proof to the smart contract
-            // await contractClient.submitUptimeProof(signedMsg);
-            // logging.infof("Submitted uptime proof for validator %s to contract", val.nodeId);
+            // 4. Submit the signed uptime proof to the smart contract
+            await contractClient.submitUptimeProof(signedMsg);
+            logging.infof("Submitted uptime proof for validator %s to contract", val.nodeId);
           } catch (error) {
             handleError(`processing validator ${val.nodeId}`, error as Error);
             continue;
@@ -64,7 +63,6 @@ async function main(): Promise<void> {
         logging.errorf("Error fetching validator uptimes: %s", (error as Error).message);
       }
       
-      // 5. Sleep until the next day (24 hours)
       logging.info("Uptime proof cycle completed. Sleeping for 24 hours...");
       await sleep(24 * 60 * 60 * 1000);
     }

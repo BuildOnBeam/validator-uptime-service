@@ -13,7 +13,7 @@ interface AggregatorResponse {
   "signed-message": string;
 }
 
-const codecVersion = 0;
+const CODEC_VERSION = 0;
 const VALIDATION_UPTIME_MESSAGE_TYPE_ID = 0;
 
 function concatenateUint8Arrays(...arrays: Uint8Array[]): Uint8Array {
@@ -60,7 +60,7 @@ function encodeVarBytes(bytes: Uint8Array): Uint8Array {
 function newAddressedCall(sourceAddress: Uint8Array, payload: Uint8Array): Uint8Array {
   const parts: Uint8Array[] = [];
 
-  parts.push(encodeUint16(codecVersion));
+  parts.push(encodeUint16(CODEC_VERSION));
   parts.push(encodeUint32(1));
   parts.push(encodeVarBytes(sourceAddress));
   parts.push(encodeVarBytes(payload));
@@ -71,7 +71,7 @@ function newAddressedCall(sourceAddress: Uint8Array, payload: Uint8Array): Uint8
 function newUnsignedMessage(networkID: number, sourceChainID: string, message: Uint8Array): Uint8Array {
   const parts: Uint8Array[] = [];
 
-  parts.push(encodeUint16(codecVersion));
+  parts.push(encodeUint16(CODEC_VERSION));
 
   parts.push(encodeUint32(networkID));
 
@@ -156,7 +156,7 @@ export class AggregatorClient {
     
     // 6. Create the message payload with the proper format
     const messagePayload = concatenateUint8Arrays(
-      encodeUint16(codecVersion),
+      encodeUint16(CODEC_VERSION),
       encodeUint32(VALIDATION_UPTIME_MESSAGE_TYPE_ID),
       validationIdBytes,
       encodeUint64(BigInt(uptimeSeconds))
