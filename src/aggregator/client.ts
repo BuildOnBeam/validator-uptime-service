@@ -202,7 +202,7 @@ export class AggregatorClient {
         let errorMsg = `Aggregator request failed with status code: ${error.response.status}`;
         if (error.response.data && error.response.data.error) {
           errorMsg = `Aggregator error: ${error.response.data.error}`;
-          console.log("Error details:", JSON.stringify(error));
+          console.log("Error details:", JSON.stringify(error.response.data));
         }
         throw new Error(errorMsg);
       }
