@@ -122,30 +122,16 @@ export class AggregatorClient {
   async packValidationUptimeMessage(validationId: string, uptimeSeconds: number): Promise<Uint8Array> {
     let validationIdBytes: Uint8Array;
     
-    // 1. Remove "NodeID-" prefix
-    if (validationId.startsWith("NodeID-")) {
-      validationId = validationId.substring("NodeID-".length);
-    }
-    
-    // 2. Decode the base58 string
+    // 1. Decode the base58 string
     const decoded = bs58.decode(validationId);
     if (decoded.length < 4) {
       throw new Error("Decoded validationID is too short");
     }
     
-    // 3. Separate data bytes and the 4-byte checksum
+    // 2. Separate data bytes and the 4-byte checksum
     const data = decoded.slice(0, decoded.length - 4);
-    const checksum = decoded.slice(decoded.length - 4);
     
-    // 4. Verify checksum (last 4 bytes of SHA-256 of data)
-    const hash = crypto.createHash('sha256').update(Buffer.from(data)).digest();
-    const expectedChecksum = hash.slice(hash.length - 4);
-    
-    if (!Buffer.from(checksum).equals(Buffer.from(expectedChecksum))) {
-      throw new Error("ValidationID checksum mismatch");
-    }
-    
-    // 5. Ensure data is 32 bytes, pad with leading zeros if shorter
+    // 3. Ensure data is 32 bytes, pad with leading zeros if shorter
     if (data.length > 32) {
       throw new Error(`ValidationID raw data is ${data.length} bytes, exceeds 32 bytes`);
     }
@@ -154,7 +140,7 @@ export class AggregatorClient {
     // Right-align the data in the 32-byte array (pad front with zeros)
     validationIdBytes.set(data, 32 - data.length);
     
-    // 6. Create the message payload with the proper format
+    // 4. Create the message payload with the proper format
     const messagePayload = concatenateUint8Arrays(
       encodeUint16(CODEC_VERSION),
       encodeUint32(VALIDATION_UPTIME_MESSAGE_TYPE_ID),
@@ -162,10 +148,11 @@ export class AggregatorClient {
       encodeUint64(BigInt(uptimeSeconds))
     );
     
-    // 7. Create addressed call with empty source address
+    // 5. Create addressed call with empty source address
     const addressedCall = newAddressedCall(new Uint8Array([]), messagePayload);
     
-    // 8. Create unsigned message
+    // 6. Create unsigned message
+    console.log(this.sourceChainID, validationId);
     return newUnsignedMessage(this.networkID, this.sourceChainID, addressedCall);
   }
   
