@@ -17,10 +17,12 @@ async function main(): Promise<void> {
     
     const aggClient = new AggregatorClient(
       cfg.aggregatorUrl,
+      cfg.beamRpc,
+      cfg.messagingContractAddress,
       cfg.signingSubnetId,
       cfg.quorumPercentage,
-      cfg.networkId,
-      cfg.sourceChainId
+      // cfg.networkId,
+      // cfg.sourceChainId
     );
     
     const contractClient = new ContractClient(
@@ -30,6 +32,7 @@ async function main(): Promise<void> {
     );
     
     logging.infof("Connected to staking manager contract at %s", cfg.stakingManagerAddress);
+    logging.infof("Connected to validator messages contract at %s", cfg.messagingContractAddress);
     
     logging.info("Starting uptime-service loop...");
     
@@ -42,7 +45,7 @@ async function main(): Promise<void> {
         // 2. For each validator, build message, aggregate signatures, and submit proof
         for (const val of validators) {
           try {
-            // Build the unsigned uptime message for this validator using the new format
+            // Build the unsigned uptime message for this validator by calling packValidationUptimeMessage on ValidatorMessages.sol
             const msgBytes = await aggClient.packValidationUptimeMessage(val.validationId, val.uptimeSeconds);
             logging.infof("Built uptime message for validator %s (uptime=%d seconds)", 
               val.nodeId, val.uptimeSeconds);
@@ -50,6 +53,7 @@ async function main(): Promise<void> {
             // 3. Submit to signature-aggregator service to get aggregated signature
             const signedMsg = await aggClient.submitAggregateRequest(msgBytes);
             logging.infof("Received aggregated signature for validator %s", val.nodeId);
+            logging.infof("signedmsg: %s", signedMsg.toString('hex'));
             
             // 4. Submit the signed uptime proof to the smart contract
             await contractClient.submitUptimeProof(signedMsg);

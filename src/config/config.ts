@@ -7,6 +7,7 @@ export interface Config {
   quorumPercentage: number;
   beamRpc: string;
   stakingManagerAddress: string;
+  messagingContractAddress: string;
   privateKey: string;
   logLevel: string;
   networkId?: number;
@@ -25,6 +26,7 @@ export async function loadConfig(path: string): Promise<Config> {
       quorumPercentage: parsedConfig.quorum_percentage || 67,
       beamRpc: parsedConfig.beam_rpc,
       stakingManagerAddress: parsedConfig.contract_address,
+      messagingContractAddress: parsedConfig.messaging_contract_address,
       privateKey: parsedConfig.private_key,
       logLevel: parsedConfig.log_level || "info",
       networkId: parsedConfig.network_id || 5, // Default to Fuji testnet
