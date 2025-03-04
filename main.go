@@ -45,25 +45,25 @@ func main() {
 			for _, val := range validators {
 				// Build the unsigned uptime message for this validator
 				msgHex, err := aggClient.PackValidationUptimeMessage(val.ValidationID, val.UptimeSeconds)
-				if errutil.HandleError("building uptime message for "+val.NodeID, err) {
+				if errutil.HandleError("building uptime message for "+val.ValidationID, err) {
 					continue // skip this validator on error
 				}
-				logging.Infof("Built uptime message for validator %s (uptime=%d seconds)", val.NodeID, val.UptimeSeconds)
+				logging.Infof("Built uptime message for validator %s (uptime=%d seconds). Message hex: %s", val.ValidationID, val.UptimeSeconds, msgHex)
 
 				// 3. Submit to signature-aggregator service to get aggregated signature
 				signedMsg, err := aggClient.SubmitAggregateRequest(msgHex)
-				if errutil.HandleError("aggregating signature for "+val.NodeID, err) {
+				if errutil.HandleError("aggregating signature for "+val.ValidationID, err) {
 					continue
 				}
-				logging.Infof("Received aggregated signature for validator %s", val.NodeID)
+				logging.Infof("Received aggregated signature for validator %s", val.ValidationID)
 				logging.Infof("signedmsg: %v", signedMsg)
 
 				// // // 4. Submit the signed uptime proof to the smart contract
 				// err = contractClient.SubmitUptimeProof(signedMsg)
-				// if errutil.HandleError("submitting uptime proof for "+val.NodeID, err) {
+				// if errutil.HandleError("submitting uptime proof for "+val.ValidationId, err) {
 				// 	continue
 				// }
-				// logging.Infof("Submitted uptime proof for validator %s to contract", val.NodeID)
+				// logging.Infof("Submitted uptime proof for validator %s to contract", val.ValidationId)
 			}
 		}
 
