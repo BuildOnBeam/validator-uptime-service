@@ -44,14 +44,14 @@ func main() {
 			// 2. For each validator, build message, aggregate signatures, and submit proof
 			for _, val := range validators {
 				// Build the unsigned uptime message for this validator
-				msgBytes, err := aggClient.PackValidationUptimeMessage(val.ValidationID, val.UptimeSeconds)
+				msgHex, err := aggClient.PackValidationUptimeMessage(val.ValidationID, val.UptimeSeconds)
 				if errutil.HandleError("building uptime message for "+val.NodeID, err) {
 					continue // skip this validator on error
 				}
 				logging.Infof("Built uptime message for validator %s (uptime=%d seconds)", val.NodeID, val.UptimeSeconds)
 
 				// 3. Submit to signature-aggregator service to get aggregated signature
-				signedMsg, err := aggClient.SubmitAggregateRequest(msgBytes)
+				signedMsg, err := aggClient.SubmitAggregateRequest(msgHex)
 				if errutil.HandleError("aggregating signature for "+val.NodeID, err) {
 					continue
 				}

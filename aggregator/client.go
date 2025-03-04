@@ -26,8 +26,8 @@ type AggregatorClient struct {
 type AggregatorRequest struct {
 	Message         string `json:"message,omitempty"`
 	Justification   string `json:"justification,omitempty"` // optional justification bytes? what is this
-	SigningSubnetID string `json:"signing-subnet-id,omitempty"`
-	QuorumPercent   int    `json:"quorum-percentage,omitempty"`
+	SigningSubnetID string `json:"signingSubnetId,omitempty"`
+	QuorumPercent   int    `json:"quorumPercentage,omitempty"`
 }
 
 type AggregatorResponse struct {
@@ -35,15 +35,15 @@ type AggregatorResponse struct {
 }
 
 // PackValidationUptimeMessage constructs the 46-byte uptime proof message.
-func (c *AggregatorClient) PackValidationUptimeMessage(validationID string, uptimeSeconds uint64) ([]byte, error) {
+func (c *AggregatorClient) PackValidationUptimeMessage(validationID string, uptimeSeconds uint64) (string, error) {
 	uptimePayload, err := messages.NewValidatorUptime(ids.FromStringOrPanic(validationID), uptimeSeconds)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate uptime payload: %w", err)
+		return "", fmt.Errorf("failed to generate uptime payload: %w", err)
 	}
 
 	addressedCall, err := warpPayload.NewAddressedCall(nil, uptimePayload.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate addressed call: %w", err)
+		return "", fmt.Errorf("failed to generate addressed call: %w", err)
 	}
 
 	uptimeProofUnsignedMessage, err := avalancheWarp.NewUnsignedMessage(
@@ -52,19 +52,19 @@ func (c *AggregatorClient) PackValidationUptimeMessage(validationID string, upti
 		addressedCall.Bytes(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate unsigned message: %w", err)
+		return "", fmt.Errorf("failed to generate unsigned message: %w", err)
 	}
-	// uptimeProofHex := hex.EncodeToString(uptimeProofUnsignedMessage.Bytes())
 
-	// return uptimeProofUnsignedMessage, nil
-	return uptimeProofUnsignedMessage.Bytes(), nil
+	uptimeProofHex := hex.EncodeToString(uptimeProofUnsignedMessage.Bytes())
+
+	return uptimeProofHex, nil
 }
 
-func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage []byte) ([]byte, error) {
+func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage string) ([]byte, error) {
 	log.Printf("Submitting aggregate request with message length: %d bytes", len(unsignedMessage))
 
 	req := AggregatorRequest{
-		Message: hex.EncodeToString(unsignedMessage),
+		Message: unsignedMessage,
 	}
 	if c.SigningSubnetID != "" {
 		req.SigningSubnetID = c.SigningSubnetID
