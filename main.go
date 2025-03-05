@@ -7,7 +7,7 @@ import (
 	"uptime-service/aggregator"
 	"uptime-service/config"
 
-	// "uptime-service/contract"
+	"uptime-service/contract"
 	"uptime-service/errutil"
 	"uptime-service/logging"
 	"uptime-service/validator"
@@ -28,11 +28,11 @@ func main() {
 		QuorumPercentage: cfg.QuorumPercentage,
 	}
 
-	// contractClient, err := contract.NewContractClient(cfg.BeamRPC, cfg.StakingManagerAddress, cfg.PrivateKey)
-	// if err != nil {
-	// 	log.Fatalf("Failed to initialize contract client: %v", err)
-	// }
-	// logging.Infof("Connected to staking manager contract at %s", cfg.StakingManagerAddress)
+	contractClient, err := contract.NewContractClient(cfg.BeamRPC, cfg.StakingManagerAddress, cfg.PrivateKey)
+	if err != nil {
+		log.Fatalf("Failed to initialize contract client: %v", err)
+	}
+	logging.Infof("Connected to staking manager contract at %s", cfg.StakingManagerAddress)
 
 	logging.Info("Starting uptime-service loop...")
 	for {
@@ -59,12 +59,12 @@ func main() {
 				logging.Infof("Received aggregated signature for validator %s", val.ValidationID)
 				logging.Infof("signedmsg: %v", signedMsg)
 
-				// // // 4. Submit the signed uptime proof to the smart contract
-				// err = contractClient.SubmitUptimeProof(signedMsg)
-				// if errutil.HandleError("submitting uptime proof for "+val.ValidationId, err) {
-				// 	continue
-				// }
-				// logging.Infof("Submitted uptime proof for validator %s to contract", val.ValidationId)
+				// // 4. Submit the signed uptime proof to the smart contract
+				err = contractClient.SubmitUptimeProof(signedMsg)
+				if errutil.HandleError("submitting uptime proof for "+val.ValidationID, err) {
+					continue
+				}
+				logging.Infof("Submitted uptime proof for validator %s to contract", val.ValidationID)
 			}
 		}
 

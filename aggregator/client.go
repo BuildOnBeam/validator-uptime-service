@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/ava-labs/avalanchego/ids"
 	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
@@ -32,7 +31,7 @@ type AggregatorRequest struct {
 }
 
 type AggregatorResponse struct {
-	SignedMessage string `json:"signed-message"`
+	SignedMessage string `json:"signedMessage"`
 }
 
 // PackValidationUptimeMessage constructs the 46-byte uptime proof message.
@@ -91,7 +90,7 @@ func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage string) ([]byt
 	body, _ := io.ReadAll(resp.Body)
 	log.Printf("Response status: %d, body: %s", resp.StatusCode, string(body))
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		var errResp struct {
 			Error string `json:"error"`
 		}
@@ -107,14 +106,14 @@ func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage string) ([]byt
 	}
 
 	signedHex := aggResp.SignedMessage
-	if strings.HasPrefix(signedHex, "0x") {
-		signedHex = signedHex[2:]
-	}
+	// if strings.HasPrefix(signedHex, "0x") {
+	// 	signedHex = signedHex[2:]
+	// }
 	signedBytes, err := hex.DecodeString(signedHex)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hex in signed-message: %w", err)
 	}
-	log.Printf("Successfully decoded signed message of length: %d bytes", len(signedBytes))
+	log.Printf("Successfully decoded signed message: %s (length: %d bytes)", signedHex, len(signedBytes))
 
 	return signedBytes, nil
 }
