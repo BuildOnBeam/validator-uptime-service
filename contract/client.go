@@ -3,7 +3,7 @@ package contract
 import (
 	"context"
 	"crypto/ecdsa"
-	"log"
+	"fmt"
 	"math/big"
 	"strings"
 
@@ -25,14 +25,24 @@ type ContractClient struct {
 }
 
 func NewContractClient(rpcURL, contractAddr, privateKeyHex string) (*ContractClient, error) {
+	if rpcURL == "" {
+		return nil, fmt.Errorf("rpcURL cannot be empty")
+	}
+	if contractAddr == "" {
+		return nil, fmt.Errorf("contractAddr cannot be empty")
+	}
+	if privateKeyHex == "" {
+		return nil, fmt.Errorf("privateKeyHex cannot be empty")
+	}
+
 	ethCl, err := ethclient.Dial(rpcURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to dial ethereum client: %w", err)
 	}
 
 	privKey, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid private key hex: %w", err)
 	}
 
 	pubAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
@@ -42,12 +52,12 @@ func NewContractClient(rpcURL, contractAddr, privateKeyHex string) (*ContractCli
 		 "name":"submitUptimeProof","outputs":[],"stateMutability":"nonpayable","type":"function"}
 	]`))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse contract ABI: %w", err)
 	}
 
 	chainID, err := ethCl.NetworkID(context.Background())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get network ID: %w", err)
 	}
 
 	return &ContractClient{
@@ -61,9 +71,13 @@ func NewContractClient(rpcURL, contractAddr, privateKeyHex string) (*ContractCli
 }
 
 func (c *ContractClient) SubmitUptimeProof(signedMessage []byte) error {
+	if len(signedMessage) == 0 {
+		return fmt.Errorf("signedMessage cannot be empty")
+	}
+
 	data, err := c.contractABI.Pack("submitUptimeProof", signedMessage)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to pack contract data: %w", err)
 	}
 
 	toAddr := common.HexToAddress(c.StakingManagerAddress)
@@ -72,11 +86,13 @@ func (c *ContractClient) SubmitUptimeProof(signedMessage []byte) error {
 	ctx := context.Background()
 	nonce, err := c.ethClient.PendingNonceAt(ctx, fromAddr)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get nonce: %w", err)
 	}
 
 	gasLimit, err := c.ethClient.EstimateGas(ctx, ethereum.CallMsg{
-		From: fromAddr, To: &toAddr, Gas: 0, GasPrice: nil, Value: nil, Data: data,
+		From: fromAddr,
+		To:   &toAddr,
+		Data: data,
 	})
 	if err != nil {
 		gasLimit = 300000
@@ -84,19 +100,19 @@ func (c *ContractClient) SubmitUptimeProof(signedMessage []byte) error {
 
 	gasPrice, err := c.ethClient.SuggestGasPrice(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get gas price: %w", err)
 	}
 
 	tx := types.NewTransaction(nonce, toAddr, big.NewInt(0), gasLimit, gasPrice, data)
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(c.chainID), c.privateKey)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
 	if err := c.ethClient.SendTransaction(ctx, signedTx); err != nil {
-		return err
+		return fmt.Errorf("failed to send transaction: %w", err)
 	}
 
-	log.Printf("Submitted uptime proof transaction: %s", signedTx.Hash().Hex())
+	fmt.Printf("Submitted uptime proof transaction: %s\n", signedTx.Hash().Hex())
 	return nil
 }
