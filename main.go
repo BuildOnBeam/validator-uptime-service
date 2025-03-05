@@ -24,6 +24,7 @@ func main() {
 	aggClient := &aggregator.AggregatorClient{
 		BaseURL:          cfg.AggregatorURL,
 		SigningSubnetID:  cfg.SigningSubnetID,
+		SourceChainId:    cfg.SourceChainId,
 		QuorumPercentage: cfg.QuorumPercentage,
 	}
 

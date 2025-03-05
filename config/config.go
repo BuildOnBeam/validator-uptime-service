@@ -10,6 +10,7 @@ type Config struct {
 	AvalancheAPI          string `json:"avalanche_api"`
 	AggregatorURL         string `json:"aggregator_url"`
 	SigningSubnetID       string `json:"signing_subnet_id"`
+	SourceChainId         string `json:"source_chain_id"`
 	QuorumPercentage      int    `json:"quorum_percentage"`
 	BeamRPC               string `json:"beam_rpc"`
 	StakingManagerAddress string `json:"contract_address"`

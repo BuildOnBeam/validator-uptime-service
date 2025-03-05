@@ -20,6 +20,7 @@ import (
 type AggregatorClient struct {
 	BaseURL          string
 	SigningSubnetID  string
+	SourceChainId    string
 	QuorumPercentage int
 }
 
@@ -47,8 +48,8 @@ func (c *AggregatorClient) PackValidationUptimeMessage(validationID string, upti
 	}
 
 	uptimeProofUnsignedMessage, err := avalancheWarp.NewUnsignedMessage(
-		5,
-		ids.FromStringOrPanic(c.SigningSubnetID),
+		5, //TODO: Update 5 to mainnet
+		ids.FromStringOrPanic(c.SourceChainId),
 		addressedCall.Bytes(),
 	)
 	if err != nil {
@@ -80,6 +81,7 @@ func (c *AggregatorClient) SubmitAggregateRequest(unsignedMessage string) ([]byt
 	log.Printf("Request payload: %s", string(reqData))
 	log.Printf("Sending request to: %s", c.BaseURL+"/v1/signatureAggregator/fuji/aggregateSignatures")
 
+	// TODO: Update <fuji> to mainnet
 	resp, err := http.Post(c.BaseURL+"/v1/signatureAggregator/fuji/aggregateSignatures", "application/json", bytes.NewReader(reqData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
