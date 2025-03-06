@@ -14,6 +14,7 @@ type Config struct {
 	QuorumPercentage      int    `json:"quorum_percentage"`
 	BeamRPC               string `json:"beam_rpc"`
 	StakingManagerAddress string `json:"contract_address"`
+	WarpMessengerAddress  string `json:"warp_messenger_address"`
 	PrivateKey            string `json:"private_key"`
 	LogLevel              string `json:"log_level"`
 }

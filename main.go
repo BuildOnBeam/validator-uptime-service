@@ -6,11 +6,12 @@ import (
 
 	"uptime-service/aggregator"
 	"uptime-service/config"
-
 	"uptime-service/contract"
 	"uptime-service/errutil"
 	"uptime-service/logging"
 	"uptime-service/validator"
+
+	"github.com/ava-labs/avalanchego/ids"
 )
 
 func main() {
@@ -24,11 +25,10 @@ func main() {
 	aggClient := &aggregator.AggregatorClient{
 		BaseURL:          cfg.AggregatorURL,
 		SigningSubnetID:  cfg.SigningSubnetID,
-		SourceChainId:    cfg.SourceChainId,
 		QuorumPercentage: cfg.QuorumPercentage,
 	}
 
-	contractClient, err := contract.NewContractClient(cfg.BeamRPC, cfg.StakingManagerAddress, cfg.PrivateKey)
+	contractClient, err := contract.NewContractClient(cfg.BeamRPC, cfg.StakingManagerAddress, cfg.WarpMessengerAddress, cfg.PrivateKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize contract client: %v", err)
 	}
@@ -57,10 +57,18 @@ func main() {
 					continue
 				}
 				logging.Infof("Received aggregated signature for validator %s", val.ValidationID)
-				logging.Infof("signedmsg: %v", signedMsg)
 
-				// // 4. Submit the signed uptime proof to the smart contract
-				err = contractClient.SubmitUptimeProof(signedMsg)
+				// Parse the validation ID into a 32-byte array for the contract call
+				validationIDBytes, err := ids.FromString(val.ValidationID)
+				if errutil.HandleError("parsing validation ID for "+val.ValidationID, err) {
+					continue
+				}
+
+				var validationID [32]byte
+				copy(validationID[:], validationIDBytes[:])
+
+				// 4. Submit the signed uptime proof to the smart contract
+				err = contractClient.SubmitUptimeProof(validationID, signedMsg)
 				if errutil.HandleError("submitting uptime proof for "+val.ValidationID, err) {
 					continue
 				}
