@@ -40,7 +40,9 @@ func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex st
 
 	contractABI, err := abi.JSON(strings.NewReader(`[
 		{"inputs":[{"internalType":"bytes32","name":"validationID","type":"bytes32"},{"internalType":"uint32","name":"messageIndex","type":"uint32"}],
-		 "name":"submitUptimeProof","outputs":[],"stateMutability":"nonpayable","type":"function"}
+		 "name":"submitUptimeProof","outputs":[],"stateMutability":"nonpayable","type":"function"},
+		{"inputs":[{"internalType":"bytes32","name":"validationID","type":"bytes32"},{"internalType":"uint32","name":"messageIndex","type":"uint32"}],
+		 "name":"validateUptime","outputs":[{"internalType":"uint64","name":"","type":"uint64"}],"stateMutability":"view","type":"function"}
 	]`))
 	if err != nil {
 		return nil, err
@@ -60,6 +62,50 @@ func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex st
 		chainID:               chainID,
 		contractABI:           contractABI,
 	}, nil
+}
+
+// ValidateUptime calls the validateUptime view function and returns the result
+func (c *ContractClient) ValidateUptime(validationID [32]byte, signedMessage []byte) error {
+	data, err := c.contractABI.Pack("validateUptime", validationID, uint32(0))
+	if err != nil {
+		return err
+	}
+
+	warpMessengerAddr := common.HexToAddress(c.WarpMessengerAddress)
+
+	predicateStorageSlots := BytesToHashSlice(PackPredicate(signedMessage))
+	accessList := types.AccessList{
+		{
+			Address:     warpMessengerAddr,
+			StorageKeys: predicateStorageSlots,
+		},
+	}
+
+	toAddr := common.HexToAddress(c.StakingManagerAddress)
+	fromAddr := common.HexToAddress(c.publicAddress)
+	callMsg := ethereum.CallMsg{
+		From:       fromAddr,
+		To:         &toAddr,
+		Data:       data,
+		AccessList: accessList,
+	}
+
+	// Make the call
+	ctx := context.Background()
+	result, err := c.ethClient.CallContract(ctx, callMsg, nil) // nil for latest block
+	if err != nil {
+		return err
+	}
+
+	// Unpack the result
+	var uptimeValue uint64
+	err = c.contractABI.UnpackIntoInterface(&uptimeValue, "validateUptime", result)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Uptime validation result: %d", uptimeValue)
+	return nil
 }
 
 func (c *ContractClient) SubmitUptimeProof(validationID [32]byte, signedMessage []byte) error {
