@@ -53,6 +53,7 @@ func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex st
 
 	return &ContractClient{
 		StakingManagerAddress: contractAddr,
+		WarpMessengerAddress:  warpMessengerAddr,
 		ethClient:             ethCl,
 		privateKey:            privKey,
 		publicAddress:         pubAddr,
@@ -95,24 +96,30 @@ func (c *ContractClient) SubmitUptimeProof(validationID [32]byte, signedMessage 
 	// Create the predicate transaction with the warp message attached in the access list
 	warpMessengerAddr := common.HexToAddress(c.WarpMessengerAddress)
 
-	accessList := types.AccessList{}
+	// Create the access list with predicate bytes
+	predicateStorageSlots := BytesToHashSlice(PackPredicate(signedMessage))
+	accessList := types.AccessList{
+		{
+			Address:     warpMessengerAddr,
+			StorageKeys: predicateStorageSlots,
+		},
+	}
 
-	tx := NewPredicateTx(
-		c.chainID,
-		nonce,
-		&toAddr,
-		gasLimit,
-		gasPrice,
-		gasPrice, // Using gasPrice as tip cap for simplicity
-		big.NewInt(0),
-		data,
-		accessList,
-		warpMessengerAddr,
-		signedMessage,
-	)
+	// Create the transaction
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:    c.chainID,
+		Nonce:      nonce,
+		To:         &toAddr,
+		Gas:        gasLimit,
+		GasFeeCap:  gasPrice,
+		GasTipCap:  gasPrice, // Using gasPrice as tip cap for simplicity
+		Value:      big.NewInt(0),
+		Data:       data,
+		AccessList: accessList,
+	})
 
 	// Sign the transaction
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(c.chainID), c.privateKey)
+	signedTx, err := types.SignTx(tx, types.NewLondonSigner(c.chainID), c.privateKey)
 	if err != nil {
 		return err
 	}
@@ -125,64 +132,26 @@ func (c *ContractClient) SubmitUptimeProof(validationID [32]byte, signedMessage 
 	return nil
 }
 
-// NewPredicateTx returns a transaction with the predicateAddress/predicateBytes tuple
-// packed and added to the access list of the transaction.
-func NewPredicateTx(
-	chainID *big.Int,
-	nonce uint64,
-	to *common.Address,
-	gas uint64,
-	gasPrice *big.Int,
-	gasTipCap *big.Int,
-	value *big.Int,
-	data []byte,
-	accessList types.AccessList,
-	predicateAddress common.Address,
-	predicateBytes []byte,
-) *types.Transaction {
-	predicateStorageSlots := BytesToHashSlice(PackPredicate(predicateBytes))
+// EndByte is the delimiter used for predicate bytes in subnet-evm
+const EndByte = byte(0xff)
 
-	// Add the predicate to the access list
-	accessList = append(accessList, types.AccessTuple{
-		Address:     predicateAddress,
-		StorageKeys: predicateStorageSlots,
-	})
-
-	return types.NewTx(&types.DynamicFeeTx{
-		ChainID:    chainID,
-		Nonce:      nonce,
-		To:         to,
-		Gas:        gas,
-		GasFeeCap:  gasPrice,
-		GasTipCap:  gasTipCap,
-		Value:      value,
-		Data:       data,
-		AccessList: accessList,
-	})
-}
-
-// PackPredicate packs predicateBytes to be included as StorageKeys in an AccessTuple
+// PackPredicate packs the predicate bytes using the correct format expected by the subnet-evm
 func PackPredicate(predicateBytes []byte) [][]byte {
-	// Length of each chunk in bytes (32 - 1 for the prefix)
-	const chunkSize = 31
+	// First, append the EndByte delimiter (0xff)
+	predicateBytes = append(predicateBytes, EndByte)
 
-	numChunks := (len(predicateBytes) + chunkSize - 1) / chunkSize
+	// Right-pad with zeros to a multiple of 32 bytes
+	paddedLength := (len(predicateBytes) + 31) / 32 * 32
+	paddedBytes := make([]byte, paddedLength)
+	copy(paddedBytes, predicateBytes)
+
+	// Now chunk the padded bytes into 32-byte chunks for the storage slots
+	numChunks := paddedLength / 32
 	result := make([][]byte, numChunks)
 
 	for i := 0; i < numChunks; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if end > len(predicateBytes) {
-			end = len(predicateBytes)
-		}
-
-		// Allocate a new chunk with a prefix byte and copy data
 		chunk := make([]byte, 32)
-		// First byte is the index
-		chunk[0] = byte(i)
-		// Copy the payload bytes
-		copy(chunk[1:], predicateBytes[start:end])
-
+		copy(chunk, paddedBytes[i*32:(i+1)*32])
 		result[i] = chunk
 	}
 
