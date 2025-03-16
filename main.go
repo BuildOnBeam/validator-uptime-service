@@ -69,11 +69,6 @@ func main() {
 				copy(validationID[:], validationIDBytes[:])
 
 				// 4. Submit the signed uptime proof to the smart contract
-				err = contractClient.ValidateUptime(validationID, signedMsg)
-				if errutil.HandleError("validating uptime proof for "+val.ValidationID, err) {
-					continue
-				}
-
 				err = contractClient.SubmitUptimeProof(validationID, signedMsg)
 				if errutil.HandleError("submitting uptime proof for "+val.ValidationID, err) {
 					continue
