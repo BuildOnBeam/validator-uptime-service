@@ -22,11 +22,9 @@ func main() {
 
 	logging.SetLevel(cfg.LogLevel)
 
-	aggClient := &aggregator.AggregatorClient{
-		BaseURL:          cfg.AggregatorURL,
-		SigningSubnetID:  cfg.SigningSubnetID,
-		SourceChainId:    cfg.SourceChainId,
-		QuorumPercentage: cfg.QuorumPercentage,
+	aggClient, err := aggregator.NewAggregatorClient(cfg.AggregatorURL, uint32(cfg.NetworkID), cfg.SigningSubnetID, cfg.SourceChainId, cfg.LogLevel)
+	if err != nil {
+		log.Fatalf("Failed to initialize aggregator client: %v", err)
 	}
 
 	contractClient, err := contract.NewContractClient(cfg.BeamRPC, cfg.StakingManagerAddress, cfg.WarpMessengerAddress, cfg.PrivateKey)
@@ -46,7 +44,7 @@ func main() {
 			// 2. For each validator, build message, aggregate signatures, and submit proof
 			for _, val := range validators {
 				// Build the unsigned uptime message for this validator
-				msgHex, err := aggClient.PackValidationUptimeMessage(val.ValidationID, val.UptimeSeconds)
+				msgHex, err := aggClient.PackValidationUptimeMessage(val.ValidationID, val.UptimeSeconds, uint32(cfg.NetworkID))
 				if errutil.HandleError("building uptime message for "+val.ValidationID, err) {
 					continue // skip this validator on error
 				}
@@ -65,8 +63,7 @@ func main() {
 					continue
 				}
 
-				var validationID [32]byte
-				copy(validationID[:], validationIDBytes[:])
+				validationID := ids.ID(validationIDBytes)
 
 				// 4. Submit the signed uptime proof to the smart contract
 				err = contractClient.SubmitUptimeProof(validationID, signedMsg)

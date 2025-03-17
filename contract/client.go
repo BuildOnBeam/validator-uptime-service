@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/ava-labs/avalanche-cli/pkg/contract"
+	"github.com/ava-labs/avalanche-cli/sdk/validatormanager"
+	"github.com/ava-labs/avalanchego/ids"
 	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -37,24 +39,25 @@ func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex st
 	}, nil
 }
 
-func (c ContractClient) SubmitUptimeProof(validationID [32]byte, signedMessage []byte) error {
-	log.Printf("Submitting uptime proof for validation ID %x", validationID)
-	log.Printf("Signed message length: %d bytes", len(signedMessage))
+func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *avalancheWarp.Message) error {
+	log.Printf("Submitting uptime proof for validation ID: %s", validationID)
 
 	// Parse the byte array to a warp.Message
-	signedWarpMsg, err := avalancheWarp.ParseMessage(signedMessage)
+	signedWarpMsg, err := avalancheWarp.ParseMessage(signedMessage.Bytes())
 	if err != nil {
 		return fmt.Errorf("failed to parse signed warp message: %w", err)
 	}
 
 	finalTx, _, err := contract.TxToMethodWithWarpMessage(
-		"https://build.onbeam.com/rpc/testnet",
+		"http://157.245.155.188:9650/ext/bc/y97omoP2cSyEVfdSztQHXD9EnfnVP9YKjZwAxhUfGbLAPYT9t/rpc",
+		false,
+		common.Address{},
 		hex.EncodeToString(c.privateKey.D.Bytes()),
 		common.HexToAddress(c.StakingManagerAddress),
 		signedWarpMsg,
 		big.NewInt(0),
 		"submit uptime proof",
-		nil,
+		validatormanager.ErrorSignatureToError,
 		"submitUptimeProof(bytes32,uint32)",
 		validationID,
 		uint32(0),

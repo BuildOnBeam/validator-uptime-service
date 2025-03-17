@@ -17,6 +17,7 @@ type Config struct {
 	WarpMessengerAddress  string `json:"warp_messenger_address"`
 	PrivateKey            string `json:"private_key"`
 	LogLevel              string `json:"log_level"`
+	NetworkID             int    `json:"network_id"`
 }
 
 func LoadConfig(path string) (*Config, error) {
