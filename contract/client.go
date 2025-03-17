@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ava-labs/avalanche-cli/pkg/contract"
+	"github.com/ava-labs/avalanche-cli/sdk/validatormanager"
 	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -47,14 +48,15 @@ func (c ContractClient) SubmitUptimeProof(validationID [32]byte, signedMessage [
 		return fmt.Errorf("failed to parse signed warp message: %w", err)
 	}
 
+	// "https://eu.build.onbeam.com/rpc/testnet/f3dd69ec-e73a-32d2-b0d5-3c352f6fd9ce",
 	finalTx, _, err := contract.TxToMethodWithWarpMessage(
-		"https://build.onbeam.com/rpc/testnet",
+		"https://eu.build.onbeam.com/rpc/f3dd69ec-e73a-32d2-b0d5-3c352f6fd9ce",
 		hex.EncodeToString(c.privateKey.D.Bytes()),
 		common.HexToAddress(c.StakingManagerAddress),
 		signedWarpMsg,
 		big.NewInt(0),
 		"submit uptime proof",
-		nil,
+		validatormanager.ErrorSignatureToError,
 		"submitUptimeProof(bytes32,uint32)",
 		validationID,
 		uint32(0),
