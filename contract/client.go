@@ -20,7 +20,7 @@ type ContractClient struct {
 	StakingManagerAddress string
 	WarpMessengerAddress  string
 	privateKey            *ecdsa.PrivateKey
-	publicAddress         string // address of the uptime service wallet (from private key)
+	publicAddress         string
 }
 
 func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex string) (*ContractClient, error) {
@@ -40,7 +40,7 @@ func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex st
 }
 
 func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *avalancheWarp.Message) error {
-	log.Printf("Submitting uptime proof for validation ID: %s", validationID)
+	log.Printf("Submitting uptime proof for validation ID: %s", validationID.Hex())
 
 	// Parse the byte array to a warp.Message
 	signedWarpMsg, err := avalancheWarp.ParseMessage(signedMessage.Bytes())
@@ -48,8 +48,9 @@ func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *av
 		return fmt.Errorf("failed to parse signed warp message: %w", err)
 	}
 
+	// "http://157.245.155.188:9650/ext/bc/y97omoP2cSyEVfdSztQHXD9EnfnVP9YKjZwAxhUfGbLAPYT9t/rpc",
 	finalTx, _, err := contract.TxToMethodWithWarpMessage(
-		"http://157.245.155.188:9650/ext/bc/y97omoP2cSyEVfdSztQHXD9EnfnVP9YKjZwAxhUfGbLAPYT9t/rpc",
+		"https://eu.build.onbeam.com/rpc/testnet/f3dd69ec-e73a-32d2-b0d5-3c352f6fd9ce",
 		false,
 		common.Address{},
 		hex.EncodeToString(c.privateKey.D.Bytes()),
@@ -66,6 +67,6 @@ func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *av
 		return fmt.Errorf("failed to send tx to validator manager: %w", err)
 	}
 
-	log.Printf("Submitted uptime proof transaction: %s", finalTx.Hash().Hex())
+	log.Printf("SUCCESS: Submitted uptime proof transaction: %s", finalTx.Hash().Hex())
 	return nil
 }
