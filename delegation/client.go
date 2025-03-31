@@ -3,7 +3,7 @@ package delegation
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
+	"crypto/ecdsa" // Added hex package
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -81,8 +81,15 @@ func NewDelegationClient(graphqlEndpoint, rpcURL, stakingManagerAddr, privateKey
 
 // GetDelegationsForValidator fetches all delegations for a given validator
 func (dc *DelegationClient) GetDelegationsForValidator(validationID string) ([]Delegation, error) {
+	// Convert the validation ID to ids.ID format (consistent with other code)
+	validationIDBytes, err := ids.FromString(validationID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse validation ID for %s: %w", validationID, err)
+	}
+	formattedID := ids.ID(validationIDBytes).Hex()
+
 	query := `
-	query GetDelegations($validationID: String!) {
+	query GetDelegations($validationID: Bytes!) {
 		delegations(where: {validationID: $validationID}) {
 			id
 			validationID
@@ -90,7 +97,7 @@ func (dc *DelegationClient) GetDelegationsForValidator(validationID string) ([]D
 	}`
 
 	variables := map[string]interface{}{
-		"validationID": validationID,
+		"validationID": formattedID,
 	}
 
 	graphqlQuery := GraphQLQuery{
