@@ -8,6 +8,7 @@ import (
 	"uptime-service/aggregator"
 	"uptime-service/config"
 	"uptime-service/contract"
+	"uptime-service/delegation"
 	"uptime-service/errutil"
 	"uptime-service/logging"
 	"uptime-service/validator"
@@ -35,6 +36,18 @@ func main() {
 	}
 	logging.Infof("Connected to staking manager contract at %s", cfg.StakingManagerAddress)
 
+	// Initialize the delegation client
+	delegationClient, err := delegation.NewDelegationClient(
+		cfg.GraphQLEndpoint,
+		cfg.BeamRPC,
+		cfg.StakingManagerAddress,
+		cfg.PrivateKey,
+	)
+	if err != nil {
+		log.Fatalf("Failed to initialize delegation client: %v", err)
+	}
+	logging.Info("Connected to delegation service")
+
 	logging.Info("Starting uptime-service loop...")
 	for {
 		// 1. Fetch current validators and their uptime from Avalanche P-Chain
@@ -43,6 +56,10 @@ func main() {
 			logging.Errorf("Error fetching validator uptimes: %v", err)
 		} else {
 			logging.Infof("Fetched %d validators' uptime info", len(validators))
+
+			// Track validators with successful uptime submissions
+			successfulValidators := make([]string, 0)
+
 			// 2. For each validator, build message, aggregate signatures, and submit proof
 			for _, val := range validators {
 				// Parse the validation ID into a 32-byte array for the contract call
@@ -152,11 +169,35 @@ func main() {
 					continue
 				}
 				logging.Infof("Submitted uptime proof for validator %s to contract with uptime %d seconds", val.ValidationID, successfulUptimeSeconds)
+
+				// Add this validator to the successful list for delegation resolution
+				successfulValidators = append(successfulValidators, val.ValidationID)
+			}
+
+			// 3. For each successful validator, fetch and resolve delegations
+			logging.Infof("Processing delegations for %d successful validators", len(successfulValidators))
+			for _, validationID := range successfulValidators {
+				// Fetch delegations for this validator
+				delegations, err := delegationClient.GetDelegationsForValidator(validationID)
+				if errutil.HandleError("fetching delegations for "+validationID, err) {
+					continue
+				}
+
+				logging.Infof("Found %d delegations for validator %s", len(delegations), validationID)
+
+				// Resolve rewards for these delegations
+				if len(delegations) > 0 {
+					err = delegationClient.ResolveRewards(delegations)
+					if errutil.HandleError("resolving rewards for validator "+validationID, err) {
+						continue
+					}
+					logging.Infof("Successfully resolved rewards for %d delegations of validator %s", len(delegations), validationID)
+				}
 			}
 		}
 
 		// 5. Sleep until the next day (24 hours).
-		logging.Info("Uptime proof cycle completed. Sleeping for 24 hours...")
+		logging.Info("Uptime proof and delegation reward cycle completed. Sleeping for 24 hours...")
 		time.Sleep(24 * time.Hour)
 	}
 }

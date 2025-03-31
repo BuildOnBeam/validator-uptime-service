@@ -9,6 +9,7 @@ import (
 type Config struct {
 	AvalancheAPI          string `json:"avalanche_api"`
 	AggregatorURL         string `json:"aggregator_url"`
+	GraphQLEndpoint       string `json:"graphql_endpoint"`
 	SigningSubnetID       string `json:"signing_subnet_id"`
 	SourceChainId         string `json:"source_chain_id"`
 	QuorumPercentage      int    `json:"quorum_percentage"`
@@ -31,6 +32,7 @@ func LoadConfig(path string) (*Config, error) {
 	cfg := &Config{
 		QuorumPercentage: 67,
 		LogLevel:         "info",
+		GraphQLEndpoint:  "https://graph.onbeam.com/subgraphs/name/pos-testnet/graphql",
 	}
 	if err := decoder.Decode(cfg); err != nil {
 		return nil, err
