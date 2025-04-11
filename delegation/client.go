@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa" // Added hex package
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -158,12 +159,29 @@ func (dc *DelegationClient) ResolveRewards(delegations []Delegation) error {
 	for _, delegation := range delegations {
 		// Convert hex string ID to bytes32
 		var id [32]byte
-		idObj, err := ids.FromString(delegation.ID)
+
+		// Remove "0x" prefix if present
+		hexID := delegation.ID
+		if strings.HasPrefix(hexID, "0x") {
+			hexID = hexID[2:]
+		}
+
+		// Decode hex string to bytes
+		idBytes, err := hex.DecodeString(hexID)
 		if err != nil {
-			logging.Errorf("Failed to parse delegation ID %s: %v", delegation.ID, err)
+			logging.Errorf("Failed to decode hex delegation ID %s: %v", delegation.ID, err)
 			continue
 		}
-		copy(id[:], idObj[:])
+
+		// Ensure the decoded bytes fit in our bytes32 array
+		if len(idBytes) > 32 {
+			logging.Errorf("Delegation ID %s exceeds 32 bytes", delegation.ID)
+			continue
+		}
+
+		// Copy bytes to id array (right-aligned)
+		copy(id[32-len(idBytes):], idBytes)
+
 		delegationIDs = append(delegationIDs, id)
 	}
 
