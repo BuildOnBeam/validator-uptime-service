@@ -19,6 +19,7 @@ type Config struct {
 	PrivateKey            string `json:"private_key"`
 	LogLevel              string `json:"log_level"`
 	NetworkID             int    `json:"network_id"`
+	DatabaseURL           string `json:"database_url"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -33,6 +34,7 @@ func LoadConfig(path string) (*Config, error) {
 		QuorumPercentage: 67,
 		LogLevel:         "info",
 		GraphQLEndpoint:  "https://graph.onbeam.com/subgraphs/name/pos-testnet/graphql",
+		DatabaseURL:      "postgres://postgres:postgres@localhost:5432/uptimeservice?sslmode=disable",
 	}
 	if err := decoder.Decode(cfg); err != nil {
 		return nil, err

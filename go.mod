@@ -7,6 +7,7 @@ require (
 	github.com/ava-labs/avalanchego v1.13.0-fuji-rc.2.0.20250313194317-c78027fe41c9
 	github.com/ava-labs/subnet-evm v0.7.2
 	github.com/ethereum/go-ethereum v1.13.14
+	github.com/lib/pq v1.10.9
 )
 
 require (
