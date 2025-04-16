@@ -1,1 +1,6 @@
+# local env files
+.env
 config.json
+
+#
+.DS_Store
