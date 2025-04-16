@@ -6,7 +6,7 @@ require (
 	github.com/ava-labs/avalanche-cli v1.8.10
 	github.com/ava-labs/avalanchego v1.13.1-0.20250326010016-044f93f83526
 	github.com/ava-labs/subnet-evm v0.7.3
-	github.com/ethereum/go-ethereum v1.13.14
+	github.com/ethereum/go-ethereum v1.13.15
 	github.com/lib/pq v1.10.9
 )
 
