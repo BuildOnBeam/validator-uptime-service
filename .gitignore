@@ -1,6 +1,8 @@
 # local env files
 .env
 config.json
+config.json.testnet
+config.json.mainnet
 
 #
 .DS_Store
