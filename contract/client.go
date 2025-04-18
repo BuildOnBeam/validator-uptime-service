@@ -17,6 +17,7 @@ import (
 )
 
 type ContractClient struct {
+	RPCURL                string
 	StakingManagerAddress string
 	WarpMessengerAddress  string
 	privateKey            *ecdsa.PrivateKey
@@ -32,6 +33,7 @@ func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex st
 	pubAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
 	return &ContractClient{
+		RPCURL:                rpcURL,
 		StakingManagerAddress: contractAddr,
 		WarpMessengerAddress:  warpMessengerAddr,
 		privateKey:            privKey,
@@ -48,9 +50,8 @@ func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *av
 		return fmt.Errorf("failed to parse signed warp message: %w", err)
 	}
 
-	// "http://157.245.155.188:9650/ext/bc/y97omoP2cSyEVfdSztQHXD9EnfnVP9YKjZwAxhUfGbLAPYT9t/rpc",
 	finalTx, _, err := contract.TxToMethodWithWarpMessage(
-		"https://eu.build.onbeam.com/rpc/testnet/f3dd69ec-e73a-32d2-b0d5-3c352f6fd9ce",
+		c.RPCURL,
 		false,
 		common.Address{},
 		hex.EncodeToString(c.privateKey.D.Bytes()),
