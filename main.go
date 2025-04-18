@@ -87,9 +87,9 @@ func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	if len(inactiveValidators) > 0 {
 		logging.Infof("Filtered out %d inactive validators", len(inactiveValidators))
 		logging.Info("Inactive NodeIDs:")
-      for _, nodeID := range inactiveValidators {
-        logging.Info(" - " + nodeID)
-      }
+		for _, nodeID := range inactiveValidators {
+			logging.Info(" - " + nodeID)
+		}
 	}
 
 	// 3. For each active validator, build message and aggregate signatures

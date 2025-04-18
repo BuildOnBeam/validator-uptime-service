@@ -11,7 +11,7 @@ import (
 type ValidatorUptime struct {
 	ValidationID  string
 	UptimeSeconds uint64
-  NodeID        string
+	NodeID        string
 	IsActive      bool
 }
 
@@ -21,7 +21,7 @@ type rpcResponse struct {
 		Validators []struct {
 			ValidationID  string `json:"validationID"`
 			UptimeSeconds uint64 `json:"uptimeSeconds"`
-      NodeID        string `json:"nodeID"`
+			NodeID        string `json:"nodeID"`
 			IsActive      bool   `json:"isActive"`
 		} `json:"validators"`
 	} `json:"result"`
@@ -61,7 +61,7 @@ func FetchUptimes(apiBaseURL string) ([]ValidatorUptime, error) {
 		validators = append(validators, ValidatorUptime{
 			ValidationID:  v.ValidationID,
 			UptimeSeconds: v.UptimeSeconds,
-      NodeID:        v.NodeID,
+			NodeID:        v.NodeID,
 			IsActive:      v.IsActive,
 		})
 	}
