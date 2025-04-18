@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/ava-labs/avalanche-cli/cmd/blockchaincmd"
-	"github.com/ava-labs/avalanche-cli/pkg/models"
 	"github.com/ava-labs/avalanche-cli/sdk/interchain"
+	"github.com/ava-labs/avalanche-cli/sdk/network"
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
@@ -35,11 +35,11 @@ func NewAggregatorClient(nodeURI string, networkID uint32, subnetID string, bloc
 		return nil, fmt.Errorf("failed to get extra peers: %w", err)
 	}
 
-	var network models.Network
+	var avalancheNetwork network.Network
 	if networkID == 1 {
-		network = models.NewMainnetNetwork()
+		avalancheNetwork = network.MainnetNetwork()
 	} else {
-		network = models.NewFujiNetwork()
+		avalancheNetwork = network.FujiNetwork()
 	}
 
 	level, err := logging.ToLevel("off")
@@ -55,7 +55,7 @@ func NewAggregatorClient(nodeURI string, networkID uint32, subnetID string, bloc
 	}
 	signatureAggregator, err := interchain.NewSignatureAggregator(
 		context.Background(),
-		network,
+		avalancheNetwork,
 		logger,
 		id,
 		interchain.DefaultQuorumPercentage,
