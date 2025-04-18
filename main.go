@@ -79,8 +79,8 @@ func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	for _, val := range validators {
 		if val.IsActive {
 			activeValidators = append(activeValidators, val)
-		}	else {
-		  inactiveValidators = append(inactiveValidators, val.NodeID)
+		} else {
+			inactiveValidators = append(inactiveValidators, val.NodeID)
 		}
 	}
 
