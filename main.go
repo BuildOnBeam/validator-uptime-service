@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"math"
+	"time"
 
 	"uptime-service/aggregator"
 	"uptime-service/config"
@@ -46,8 +47,16 @@ func main() {
 
 	switch cmd {
 	case "generate":
+		start := time.Now()
+		defer func() {
+			logging.Infof("Generate command execution time: %s", time.Since(start))
+		}()
 		err = generateUptimeProofs(cfg, dbClient)
 	case "submit":
+		start := time.Now()
+		defer func() {
+			logging.Infof("Submit command execution time: %s", time.Since(start))
+		}()
 		err = submitUptimeProofs(cfg, dbClient)
 	}
 
