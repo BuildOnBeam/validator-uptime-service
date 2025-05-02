@@ -6,7 +6,6 @@ import (
 	"flag"
 	"log"
 	"math"
-	"sort"
 	"time"
 
 	"uptime-service/aggregator"
