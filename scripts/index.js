@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client } = require('pg');
 const axios = require('axios');
 const { BinTools } = require('avalanche');
+const fs = require('fs');
 
 // Load and validate environment variables
 const requiredEnvVars = [
@@ -67,6 +68,8 @@ function hexToCb58(hex) {
 const dbClient = new Client(DB_CONFIG);
 
 async function main() {
+  const startTime = performance.now(); // Start timer
+
   let GraphQLClient, gql;
   try {
     // Dynamically import graphql-request
@@ -101,13 +104,61 @@ async function main() {
     await dbClient.connect();
     console.log('Connected to database');
 
+    // Log DATE_FILTER for debugging
+    console.log(`Using DATE_FILTER: ${FILTER_DATE}`);
+
+    // Debug: Query all updated_at values to inspect data
+    const debugQuery = `
+      SELECT validation_id, updated_at, DATE(updated_at AT TIME ZONE 'UTC') as utc_date
+      FROM uptime_proofs
+      LIMIT 10
+    `;
+    const debugResult = await dbClient.query(debugQuery);
+    console.log(
+      'Sample updated_at values from uptime_proofs (before filtering):'
+    );
+    debugResult.rows.forEach((row) => {
+      console.log(
+        `- validation_id: ${row.validation_id}, updated_at: ${row.updated_at}, UTC Date: ${row.utc_date}`
+      );
+    });
+
     // Query database for uptime proofs not updated on FILTER_DATE
     const query = `
-      SELECT validation_id, uptime_seconds
+      SELECT validation_id, uptime_seconds, updated_at
       FROM uptime_proofs
-      WHERE updated_at::text NOT LIKE $1
+      WHERE DATE(updated_at AT TIME ZONE 'UTC')::text NOT LIKE $1
     `;
-    const result = await dbClient.query(query, [`${FILTER_DATE}%`]);
+    const filterParam = `${FILTER_DATE}%`;
+    console.log(`Query filter parameter: ${filterParam}`);
+    const result = await dbClient.query(query, [filterParam]);
+
+    // Log sample updated_at values after filtering
+    if (result.rows.length > 0) {
+      console.log('Sample updated_at values from query (after filtering):');
+      result.rows.slice(0, 3).forEach((row) => {
+        console.log(
+          `- ${row.updated_at} (UTC Date: ${
+            new Date(row.updated_at).toISOString().split('T')[0]
+          })`
+        );
+      });
+    } else {
+      console.log('No rows returned from uptime_proofs query.');
+    }
+
+    // Debug: Check for any 2025-04-30 dates that passed the filter
+    const unexpectedDates = result.rows.filter((row) =>
+      row.updated_at.toISOString().startsWith('2025-04-30')
+    );
+    if (unexpectedDates.length > 0) {
+      console.warn('Unexpected 2025-04-30 dates found in query results:');
+      unexpectedDates.forEach((row) => {
+        console.warn(
+          `- validation_id: ${row.validation_id}, updated_at: ${row.updated_at}`
+        );
+      });
+    }
 
     // Arrays to store results
     const removedValidators = [];
@@ -116,7 +167,7 @@ async function main() {
 
     // Process each row
     for (const row of result.rows) {
-      const { validation_id, uptime_seconds } = row;
+      const { validation_id, uptime_seconds, updated_at } = row;
 
       // Convert validation_id to hex
       let validationIdHex;
@@ -161,32 +212,36 @@ async function main() {
         continue;
       }
 
-      if (status === 'Removed') {
-        // Compile inactive validators
-        removedValidators.push(cb58NodeId);
-      } else {
-        // Skip if nodeID already processed
-        if (processedNodeIDs.has(cb58NodeId)) {
-          console.log(`Skipping duplicate nodeID: ${cb58NodeId}`);
-          continue;
-        }
-        processedNodeIDs.add(cb58NodeId);
+      // Skip if nodeID already processed
+      if (processedNodeIDs.has(cb58NodeId)) {
+        console.log(`Skipping duplicate nodeID: ${cb58NodeId}`);
+        continue;
+      }
+      processedNodeIDs.add(cb58NodeId);
 
+      if (status === 'Removed') {
+        // Compile inactive validators for logging
+        removedValidators.push(cb58NodeId);
+        // Add to uptimeComparisons with null API data
+        uptimeComparisons.push({
+          nodeId: cb58NodeId,
+          nodeIdHex: nodeID.replace(/^0x/, ''),
+          lastUpdated: updated_at,
+          databaseUptime: uptime_seconds,
+          apiUptime: null,
+          differenceUptime: null,
+          status: 'Removed',
+        });
+      } else {
         // Query validators API for active validators
         let validator;
         try {
           const validatorsResponse = await axios.post(VALIDATORS_API, {
             jsonrpc: '2.0',
             method: 'validators.getCurrentValidators',
-            params: { nodeIDs: [cb58NodeId] },
+            params: {},
             id: 1,
           });
-
-          // Log full response for debugging
-          console.log(
-            `Validators API response for nodeID ${cb58NodeId}:`,
-            JSON.stringify(validatorsResponse.data, null, 2)
-          );
 
           if (
             !validatorsResponse.data.result ||
@@ -195,7 +250,11 @@ async function main() {
             throw new Error('Invalid API response: missing result.validators');
           }
 
-          validator = validatorsResponse.data.result.validators[0];
+          // Find the validator matching cb58NodeId
+          validator = validatorsResponse.data.result.validators.find(
+            (v) => v.nodeID === cb58NodeId
+          );
+
           if (!validator) {
             console.warn(`No validator data found for nodeID: ${cb58NodeId}`);
             continue;
@@ -210,40 +269,75 @@ async function main() {
         const apiUptimeSeconds = validator.uptimeSeconds;
         const difference = apiUptimeSeconds - uptime_seconds;
 
-        // Store comparison data
+        // Add to uptimeComparisons with API data
         uptimeComparisons.push({
-          nodeID: cb58NodeId,
-          lastUpdated: row.updated_at, // Note: updated_at not selected, adjust query if needed
-          dbUptimeSeconds: uptime_seconds,
-          apiUptimeSeconds: apiUptimeSeconds,
-          difference,
+          nodeId: cb58NodeId,
+          nodeIdHex: nodeID.replace(/^0x/, ''),
+          lastUpdated: updated_at,
+          databaseUptime: uptime_seconds,
+          apiUptime: apiUptimeSeconds,
+          differenceUptime: difference,
+          status: 'Active',
         });
       }
     }
 
-    // Output results
-    console.log('\n=== Inactive Validators (Status: Removed) ===');
-    if (removedValidators.length === 0) {
-      console.log('No inactive validators found.');
-    } else {
-      removedValidators.forEach((nodeId) => console.log(`- ${nodeId}`));
-    }
+    // Output inactive node IDs in a single log
+    console.log(
+      '\nInactive Node IDs:',
+      removedValidators.length > 0
+        ? `[${removedValidators.join(', ')}]`
+        : 'None'
+    );
 
-    console.log('\n=== Uptime Comparison for Active Validators ===');
-    if (uptimeComparisons.length === 0) {
+    // Output uptime comparisons for active validators
+    console.log('\n=== Active Validators (Status: Active) ===');
+    const activeValidators = uptimeComparisons.filter(
+      (comp) => comp.status === 'Active'
+    );
+    if (activeValidators.length === 0) {
       console.log('No active validators to compare.');
     } else {
-      uptimeComparisons.forEach((comp) => {
+      activeValidators.forEach((comp) => {
         console.log(`
-Node ID: ${comp.nodeID}
-Last Updated: ${
-          comp.lastUpdated || 'N/A'
-        } (Note: Add updated_at to query if needed)
-Database Uptime (seconds): ${comp.dbUptimeSeconds}
-API Uptime (seconds): ${comp.apiUptimeSeconds}
-Difference (API - DB): ${comp.difference} seconds
+Node ID: ${comp.nodeId}
+Node ID (Hex): ${comp.nodeIdHex}
+Last Updated: ${comp.lastUpdated}
+Database Uptime (seconds): ${comp.databaseUptime}
+API Uptime (seconds): ${comp.apiUptime}
+Difference (API - DB): ${comp.differenceUptime} seconds
+Status: ${comp.status}
         `);
       });
+    }
+
+    // Write reports to JSON files
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+      // Removed validators report
+      const removedValidatorsReport = uptimeComparisons.filter(
+        (comp) => comp.status === 'Removed'
+      );
+      const removedFilename = `uptime_report_${timestamp}_removed.json`;
+      fs.writeFileSync(
+        removedFilename,
+        JSON.stringify(removedValidatorsReport, null, 2)
+      );
+      console.log(`Removed validators report saved to ${removedFilename}`);
+
+      // Active validators (discrepancy) report
+      const activeValidatorsReport = uptimeComparisons.filter(
+        (comp) => comp.status === 'Active'
+      );
+      const discrepancyFilename = `uptime_report_${timestamp}_discrepancy.json`;
+      fs.writeFileSync(
+        discrepancyFilename,
+        JSON.stringify(activeValidatorsReport, null, 2)
+      );
+      console.log(`Discrepancy report saved to ${discrepancyFilename}`);
+    } catch (error) {
+      console.error(`Failed to write report to JSON file: ${error.message}`);
     }
   } catch (error) {
     console.error('Error:', error.message);
@@ -251,6 +345,11 @@ Difference (API - DB): ${comp.difference} seconds
     // Close database connection
     await dbClient.end();
     console.log('Database connection closed');
+
+    // Log execution time
+    const endTime = performance.now();
+    const duration = (endTime - startTime) / 1000; // Convert to seconds
+    console.log(`Script execution time: ${duration.toFixed(3)} seconds`);
   }
 }
 
