@@ -1,11 +1,12 @@
-// main.go
-
 package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"math"
+	"sort"
+	"strings"
 	"time"
 
 	"uptime-service/aggregator"
@@ -71,9 +72,25 @@ func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	}
 
 	uptimeMap := validator.FetchAggregatedUptimes(cfg.AvalancheAPIList)
-	logging.Infof("Fetched uptime info for %d validators from %d nodes", len(uptimeMap), len(cfg.AvalancheAPIList))
+	logging.Infof("Fetched uptime info for %d validationIDs from %d nodes", len(uptimeMap), len(cfg.AvalancheAPIList))
+
+	// Preload stored uptimes from DB
+	storedProofs, err := dbClient.GetAllUptimeProofs()
+	if err != nil {
+		return fmt.Errorf("failed to load existing uptime proofs: %w", err)
+	}
 
 	for validationID, uptimeSamples := range uptimeMap {
+		startVal := time.Now()
+		logging.Infof("==== Processing validationID %s ====", validationID)
+		logging.Infof("Uptime samples for %s: %v", validationID, uptimeSamples)
+
+    sort.Slice(uptimeSamples, func(i, j int) bool {
+      return uptimeSamples[i] > uptimeSamples[j]
+    })
+
+		logging.Infof("Sorted uptime samples for %s: %v", validationID, uptimeSamples)
+
 		if len(uptimeSamples) == 0 {
 			continue
 		}
@@ -84,79 +101,129 @@ func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 		}
 		valID := ids.ID(validationIDBytes)
 
-		var successfulUptimeSeconds uint64
-		var successfulSignedMsg *avalancheWarp.Message
+		var signedMsg *avalancheWarp.Message
+		var finalUptime uint64
+		var attempted bool
 
-		success := false
-
-		for _, uptime := range uptimeSamples {
-			current := uptime
+		for idx, initialUptime := range uptimeSamples {
+			logging.Infof("Trying sample #%d with uptime = %d seconds for validationID %s", idx+1, initialUptime, validationID)
+			current := initialUptime
 			unsignedMsg, err := aggClient.PackValidationUptimeMessage(validationID, current, uint32(cfg.NetworkID))
-			if errutil.HandleError("packing uptime msg for "+validationID, err) {
+			if err != nil {
 				continue
 			}
-
-			signedMsg, err := aggClient.SubmitAggregateRequest(unsignedMsg)
+			signed, err := aggClient.SubmitAggregateRequest(unsignedMsg)
 			if err != nil {
 				continue
 			}
 
-			// success - try to increase
-			success = true
-			successfulUptimeSeconds = current
-			successfulSignedMsg = signedMsg
+			attempted = true
+			signedMsg = signed
+			finalUptime = current
+			logging.Infof("Initial signature succeeded with uptime = %d for validationID %s", current, validationID)
 
 			for {
 				next := uint64(math.Ceil(float64(current) * 1.05))
 				if next <= current {
 					next = current + 1
 				}
+				logging.Infof("Trying with increased uptime = %d for validationID %s", next, validationID)
 				unsignedMsg, err := aggClient.PackValidationUptimeMessage(validationID, next, uint32(cfg.NetworkID))
 				if err != nil {
 					break
 				}
-				tempSignedMsg, err := aggClient.SubmitAggregateRequest(unsignedMsg)
+				signedTemp, err := aggClient.SubmitAggregateRequest(unsignedMsg)
 				if err != nil {
+					logging.Infof("Failed to sign at increased uptime = %d for %s, using last successful value %d", next, validationID, current)
 					break
 				}
 				current = next
-				successfulUptimeSeconds = current
-				successfulSignedMsg = tempSignedMsg
+				finalUptime = current
+				signedMsg = signedTemp
 			}
-			break // break outer loop after first accepted + increase sweep
+			break
 		}
 
-		if !success {
-			// fallback: decrease
-			current := uptimeSamples[0] // start with highest
+		if !attempted {
+			current := uptimeSamples[len(uptimeSamples)-1]
+			storedUptime := uint64(0)
+			if proof, exists := storedProofs[validationID]; exists {
+				storedUptime = proof.UptimeSeconds
+			}
+
+			logging.Infof("Initial signature attempts failed for %s. Trying with decreasing values from lowest sample: %d", validationID, current)
 			for {
 				current = uint64(math.Floor(float64(current) * 0.95))
 				if current == 0 {
+					logging.Infof("Uptime seconds reached zero for %s, aborting retry", validationID)
 					break
 				}
+
+				// Stop if we reach or drop below stored uptime
+				if storedUptime > 0 && current <= storedUptime {
+					logging.Infof("Reached stored uptime (%d) or below for %s; attempting stored value", storedUptime, validationID)
+					unsignedMsg, err := aggClient.PackValidationUptimeMessage(validationID, storedUptime, uint32(cfg.NetworkID))
+					if err == nil {
+						signed, err := aggClient.SubmitAggregateRequest(unsignedMsg)
+						if err == nil {
+							finalUptime = storedUptime
+							signedMsg = signed
+						} else {
+							logging.Infof("Signing with stored uptime %d failed for %s: %v", storedUptime, validationID, err)
+						}
+					}
+					break
+				}
+
+				logging.Infof("Trying with decreased uptime = %d for %s", current, validationID)
 				unsignedMsg, err := aggClient.PackValidationUptimeMessage(validationID, current, uint32(cfg.NetworkID))
 				if err != nil {
 					break
 				}
-				signedMsg, err := aggClient.SubmitAggregateRequest(unsignedMsg)
+				signed, err := aggClient.SubmitAggregateRequest(unsignedMsg)
 				if err == nil {
-					successfulUptimeSeconds = current
-					successfulSignedMsg = signedMsg
+					finalUptime = current
+					signedMsg = signed
 					break
 				}
 			}
 		}
 
-		if successfulSignedMsg == nil {
-			logging.Errorf("Failed to get any successful signature for validator %s", validationID)
+		if signedMsg == nil {
+			logging.Errorf("No valid signature for validationID %s", validationID)
 			continue
 		}
 
-		err = dbClient.StoreUptimeProof(valID, successfulUptimeSeconds, successfulSignedMsg)
-		if errutil.HandleError("storing uptime proof for "+validationID, err) {
+		err = dbClient.StoreUptimeProof(valID, finalUptime, signedMsg)
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "refresh_required:") {
+				var storedUptime uint64
+				fmt.Sscanf(err.Error(), "refresh_required:%d", &storedUptime)
+				logging.Infof("Re-signing with stored higher uptime %d for %s", storedUptime, validationID)
+				unsignedMsg, err := aggClient.PackValidationUptimeMessage(validationID, storedUptime, uint32(cfg.NetworkID))
+				if err != nil {
+					logging.Errorf("failed to repack for refresh: %v", err)
+					continue
+				}
+				signed, err := aggClient.SubmitAggregateRequest(unsignedMsg)
+				if err != nil {
+					logging.Errorf("refresh signature failed: %v", err)
+					continue
+				}
+				err = dbClient.StoreUptimeProof(valID, storedUptime, signed)
+				if err != nil {
+					logging.Errorf("failed to refresh store: %v", err)
+					continue
+				}
+				logging.Infof("Refreshed record for %s at stored uptime %d", validationID, storedUptime)
+			} else {
+				logging.Errorf("store failed: %v", err)
+			}
 			continue
 		}
-		logging.Infof("Successfully stored uptime proof for validator %s with uptime %d", validationID, successfulUptimeSeconds)
+
+		logging.Infof("[✓] Stored uptime proof for %s at %d seconds", validationID, finalUptime)
+		logging.Infof("Finished processing %s in %s", validationID, time.Since(startVal))
 	}
 
 	return nil

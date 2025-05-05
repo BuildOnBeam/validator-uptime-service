@@ -28,15 +28,14 @@ func NewDBClient(dbURL string) (*DBClient, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Create table if not exists
 	_, err = db.Exec(`
-	CREATE TABLE IF NOT EXISTS uptime_proofs (
-		validation_id TEXT PRIMARY KEY,
-		uptime_seconds BIGINT NOT NULL,
-		signed_message BYTEA NOT NULL,
-		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-	)
+		CREATE TABLE IF NOT EXISTS uptime_proofs (
+			validation_id TEXT PRIMARY KEY,
+			uptime_seconds BIGINT NOT NULL,
+			signed_message BYTEA NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create uptime_proofs table: %w", err)
@@ -53,33 +52,52 @@ func (c *DBClient) Close() error {
 
 // StoreUptimeProof stores or updates an uptime proof in the database
 func (c *DBClient) StoreUptimeProof(validationID ids.ID, uptimeSeconds uint64, signedMessage *avalancheWarp.Message) error {
-	// Check if there's an existing record with higher uptime
 	var existingUptime uint64
-	err := c.db.QueryRow("SELECT uptime_seconds FROM uptime_proofs WHERE validation_id = $1", validationID.String()).Scan(&existingUptime)
+	var existingMsgBytes []byte
+	err := c.db.QueryRow("SELECT uptime_seconds, signed_message FROM uptime_proofs WHERE validation_id = $1", validationID.String()).Scan(&existingUptime, &existingMsgBytes)
 
-	// If record exists and the new uptime is not greater, don't update
-	if err == nil && uptimeSeconds <= existingUptime {
-		logging.Infof("Existing uptime for %s is higher or equal (%d >= %d), not updating",
-			validationID.String(), existingUptime, uptimeSeconds)
+	if err == sql.ErrNoRows {
+		// No record yet, insert new
+		_, err := c.db.Exec(`
+			INSERT INTO uptime_proofs (validation_id, uptime_seconds, signed_message, updated_at)
+			VALUES ($1, $2, $3, $4)
+		`, validationID.String(), uptimeSeconds, signedMessage.Bytes(), time.Now())
+		if err != nil {
+			return fmt.Errorf("failed to insert uptime proof: %w", err)
+		}
 		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to fetch existing uptime: %w", err)
 	}
 
-	// Either record doesn't exist or new uptime is higher, store/update
-	_, err = c.db.Exec(`
-	INSERT INTO uptime_proofs (validation_id, uptime_seconds, signed_message, updated_at)
-	VALUES ($1, $2, $3, $4)
-	ON CONFLICT (validation_id) 
-	DO UPDATE SET 
-		uptime_seconds = $2,
-		signed_message = $3,
-		updated_at = $4
-	`, validationID.String(), uptimeSeconds, signedMessage.Bytes(), time.Now())
-
-	if err != nil {
-		return fmt.Errorf("failed to store uptime proof: %w", err)
+	if uptimeSeconds > existingUptime {
+		// new value is greater, update
+		_, err = c.db.Exec(`
+			UPDATE uptime_proofs
+			SET uptime_seconds = $2, signed_message = $3, updated_at = $4
+			WHERE validation_id = $1
+		`, validationID.String(), uptimeSeconds, signedMessage.Bytes(), time.Now())
+		if err != nil {
+			return fmt.Errorf("failed to update uptime proof: %w", err)
+		}
+		return nil
+	} else if uptimeSeconds == existingUptime {
+		// same value — refresh signed message
+		logging.Infof("Overwriting signed message for %s with same uptime %d", validationID.String(), uptimeSeconds)
+		_, err = c.db.Exec(`
+			UPDATE uptime_proofs
+			SET signed_message = $2, updated_at = $3
+			WHERE validation_id = $1
+		`, validationID.String(), signedMessage.Bytes(), time.Now())
+		if err != nil {
+			return fmt.Errorf("failed to refresh signed message: %w", err)
+		}
+		return nil
+	} else {
+		// new value is lower, re-sign existing uptime
+		logging.Infof("Re-signing with stored higher uptime %d for %s", existingUptime, validationID.String())
+		return fmt.Errorf("refresh_required:%d", existingUptime) // trigger logic in main.go
 	}
-
-	return nil
 }
 
 // GetAllUptimeProofs retrieves all uptime proofs from the database
