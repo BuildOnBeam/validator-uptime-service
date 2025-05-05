@@ -85,9 +85,9 @@ func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 		logging.Infof("==== Processing validationID %s ====", validationID)
 		logging.Infof("Uptime samples for %s: %v", validationID, uptimeSamples)
 
-    sort.Slice(uptimeSamples, func(i, j int) bool {
-      return uptimeSamples[i] > uptimeSamples[j]
-    })
+		sort.Slice(uptimeSamples, func(i, j int) bool {
+			return uptimeSamples[i] > uptimeSamples[j]
+		})
 
 		logging.Infof("Sorted uptime samples for %s: %v", validationID, uptimeSamples)
 
