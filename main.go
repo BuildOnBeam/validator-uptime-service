@@ -27,13 +27,10 @@ func main() {
 	flag.Parse()
 
 	if len(flag.Args()) == 0 {
-		log.Fatalf("Command required: 'generate' or 'submit'")
+		log.Fatal("Missing command. Use one of: generate, submit-uptime-proofs, resolve-rewards")
 	}
 
-	cmd := flag.Args()[0]
-	if cmd != "generate" && cmd != "submit" {
-		log.Fatalf("Unknown command: %s. Must be 'generate' or 'submit'", cmd)
-	}
+	cmd := flag.Arg(0)
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
@@ -53,8 +50,12 @@ func main() {
 	switch cmd {
 	case "generate":
 		err = generateUptimeProofs(cfg, dbClient)
-	case "submit":
+	case "submit-uptime-proofs":
 		err = submitUptimeProofs(cfg, dbClient)
+	case "resolve-rewards":
+		err = resolveRewards(cfg, dbClient)
+	default:
+		log.Fatalf("Unknown command: %s. Must be one of: generate, submit-uptime-proofs, resolve-rewards", cmd)
 	}
 
 	if err != nil {
@@ -229,7 +230,6 @@ func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	return nil
 }
 
-// submitUptimeProofs submits uptime proofs from the database to the smart contract and resolves rewards
 func submitUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	contractClient, err := contract.NewContractClient(cfg.BeamRPC, cfg.StakingManagerAddress, cfg.WarpMessengerAddress, cfg.PrivateKey)
 	if err != nil {
@@ -237,6 +237,26 @@ func submitUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	}
 	logging.Infof("Connected to staking manager contract at %s", cfg.StakingManagerAddress)
 
+	proofs, err := dbClient.GetAllUptimeProofs()
+	if err != nil {
+		return err
+	}
+	if len(proofs) == 0 {
+		logging.Info("No uptime proofs found in database")
+		return nil
+	}
+
+	for validationIDStr, proof := range proofs {
+		err = contractClient.SubmitUptimeProof(proof.ValidationID, proof.SignedMessage)
+		if errutil.HandleError("submitting uptime proof for "+validationIDStr, err) {
+			continue
+		}
+		logging.Infof("Submitted uptime proof for validator %s to contract", validationIDStr)
+	}
+	return nil
+}
+
+func resolveRewards(cfg *config.Config, dbClient *db.DBClient) error {
 	delegationClient, err := delegation.NewDelegationClient(
 		cfg.GraphQLEndpoint,
 		cfg.BeamRPC,
@@ -248,58 +268,40 @@ func submitUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	}
 	logging.Info("Connected to delegation service")
 
-	// Get all uptime proofs from the database
 	proofs, err := dbClient.GetAllUptimeProofs()
 	if err != nil {
 		return err
 	}
 
 	if len(proofs) == 0 {
-		logging.Info("No uptime proofs found in database")
+		logging.Info("No uptime proofs found in database for resolving rewards")
 		return nil
 	}
 
-	logging.Infof("Found %d uptime proofs in database", len(proofs))
-
-	// Track validators with successful uptime submissions
-	successfulValidators := make([]string, 0)
-
-	for validationIDStr, proof := range proofs {
-		validationID := proof.ValidationID
-		signedMessage := proof.SignedMessage
-		uptimeSeconds := proof.UptimeSeconds
-
-		// Submit the signed uptime proof to the smart contract
-		err = contractClient.SubmitUptimeProof(validationID, signedMessage)
-		if errutil.HandleError("submitting uptime proof for "+validationIDStr, err) {
-			continue
-		}
-
-		logging.Infof("Submitted uptime proof for validator %s to contract with uptime %d seconds", validationIDStr, uptimeSeconds)
-
-		// Add this validator to the successful list for delegation resolution
-		successfulValidators = append(successfulValidators, validationIDStr)
+	// Deduplicate validation IDs
+	unique := map[string]bool{}
+	for validationID := range proofs {
+		unique[validationID] = true
 	}
 
-	// For each successful validator, fetch and resolve delegations
-	logging.Infof("Processing delegations for %d successful validators", len(successfulValidators))
-	for _, validationID := range successfulValidators {
-		// Fetch delegations for this validator
+	logging.Infof("Resolving rewards for %d validators", len(unique))
+
+	for validationID := range unique {
 		delegations, err := delegationClient.GetDelegationsForValidator(validationID)
 		if errutil.HandleError("fetching delegations for "+validationID, err) {
 			continue
 		}
 
-		logging.Infof("Found %d delegations for validator %s", len(delegations), validationID)
-
-		// Resolve rewards for these delegations
-		if len(delegations) > 0 {
-			err = delegationClient.ResolveRewards(delegations)
-			if errutil.HandleError("resolving rewards for validator "+validationID, err) {
-				continue
-			}
-			logging.Infof("Successfully resolved rewards for %d delegations of validator %s", len(delegations), validationID)
+		if len(delegations) == 0 {
+			logging.Infof("No delegations for %s", validationID)
+			continue
 		}
+
+		err = delegationClient.ResolveRewards(delegations)
+		if errutil.HandleError("resolving rewards for validator "+validationID, err) {
+			continue
+		}
+		logging.Infof("Successfully resolved rewards for validator %s", validationID)
 	}
 
 	return nil
