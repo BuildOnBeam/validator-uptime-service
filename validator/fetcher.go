@@ -1,11 +1,14 @@
+// validator/fetcher.go
+
 package validator
 
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
+	"sort"
+	"sync"
 )
 
 type ValidatorUptime struct {
@@ -31,39 +34,81 @@ type rpcResponse struct {
 	} `json:"error"`
 }
 
-func FetchUptimes(apiBaseURL string) ([]ValidatorUptime, error) {
+func FetchUptimesFromNode(apiBaseURL string) ([]ValidatorUptime, error) {
 	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"validators.getCurrentValidators","params":{}}`)
 	url := apiBaseURL + "/validators"
+
 	resp, err := http.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("failed to call Avalanche validators API: %w", err)
+		return nil, fmt.Errorf("failed to call Avalanche validators API (%s): %w", apiBaseURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code %d from Avalanche API", resp.StatusCode)
+		return nil, fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, apiBaseURL)
 	}
 
 	var rpcResp rpcResponse
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return nil, fmt.Errorf("failed to parse Avalanche API response: %w", err)
+		return nil, fmt.Errorf("failed to decode response from %s: %w", apiBaseURL, err)
 	}
 
 	if rpcResp.Error != nil {
 		return nil, fmt.Errorf("Avalanche API error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
+
 	if rpcResp.Result == nil {
-		return nil, errors.New("invalid response: missing result")
+		return nil, fmt.Errorf("invalid response: missing result from %s", apiBaseURL)
 	}
 
-	validators := make([]ValidatorUptime, 0, len(rpcResp.Result.Validators))
+	uptimes := make([]ValidatorUptime, 0, len(rpcResp.Result.Validators))
 	for _, v := range rpcResp.Result.Validators {
-		validators = append(validators, ValidatorUptime{
+		uptimes = append(uptimes, ValidatorUptime{
 			ValidationID:  v.ValidationID,
-			UptimeSeconds: v.UptimeSeconds,
 			NodeID:        v.NodeID,
 			IsActive:      v.IsActive,
+			UptimeSeconds: v.UptimeSeconds,
 		})
 	}
-	return validators, nil
+
+	return uptimes, nil
+}
+
+// FetchAggregatedUptimes fetches uptimes from multiple endpoints and aggregates them
+// into a map of validationID -> sorted slice of uptimeSeconds
+func FetchAggregatedUptimes(endpoints []string) map[string][]uint64 {
+	type safeMap struct {
+		sync.Mutex
+		data map[string][]uint64
+	}
+
+	result := safeMap{data: make(map[string][]uint64)}
+	var wg sync.WaitGroup
+
+	for _, endpoint := range endpoints {
+		wg.Add(1)
+		go func(api string) {
+			defer wg.Done()
+			uptimes, err := FetchUptimesFromNode(api)
+			if err != nil {
+				return // silent fail for one node
+			}
+			result.Lock()
+			for _, u := range uptimes {
+				result.data[u.ValidationID] = append(result.data[u.ValidationID], u.UptimeSeconds)
+			}
+			result.Unlock()
+		}(endpoint)
+	}
+
+	wg.Wait()
+
+	// Sort each slice descending for max-first strategy
+	for id := range result.data {
+		slice := result.data[id]
+		sort.Slice(slice, func(i, j int) bool { return slice[i] > slice[j] })
+		result.data[id] = slice
+	}
+
+	return result.data
 }
