@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"uptime-service/aggregator"
+  "uptime-service/commands"
 	"uptime-service/config"
 	"uptime-service/contract"
 	"uptime-service/db"
@@ -48,12 +49,32 @@ func main() {
 	start := time.Now()
 
 	switch cmd {
+  // main uptimeService commands
 	case "generate":
 		err = generateUptimeProofs(cfg, dbClient)
 	case "submit-uptime-proofs":
 		err = submitUptimeProofs(cfg, dbClient)
 	case "resolve-rewards":
 		err = resolveRewards(cfg, dbClient)
+
+  // supporting error-fix commands
+  case "submit-single":
+    if len(flag.Args()) < 2 {
+      log.Fatal("Usage: go run main.go submit-single <validationID-hex>")
+    }
+    validationIDHex := flag.Arg(1)
+    err = commands.SubmitAndResolveSingleValidator(cfg, dbClient, validationIDHex)
+
+  case "submit-missing-uptime-proofs":
+    err = commands.SubmitMissingUptimeProofs(cfg, dbClient)  
+
+  case "resolve-delegations":
+    if len(flag.Args()) < 2 {
+      log.Fatal("Usage: go run main.go resolve-delegations <validationID>")
+    }
+    validationID := flag.Arg(1)
+    err = commands.ResolveDelegationsForValidator(cfg, validationID)  
+
 	default:
 		log.Fatalf("Unknown command: %s. Must be one of: generate, submit-uptime-proofs, resolve-rewards", cmd)
 	}

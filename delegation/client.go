@@ -91,7 +91,7 @@ func (dc *DelegationClient) GetDelegationsForValidator(validationID string) ([]D
 
 	query := `
 	query GetDelegations($validationID: Bytes!) {
-		delegations(first: 1000, where: {validationID: $validationID, lastRewardedEpoch: "0" }) {
+		delegations(first: 1000, where: {validationID: $validationID, lastRewardedEpoch: 0, startedAt_lte: "1746095346 }) {
 			id
 			validationID
 		}
@@ -249,7 +249,7 @@ func (dc *DelegationClient) ResolveRewards(delegations []Delegation) error {
 			(i/batchSize)+1, (len(delegationIDs)+batchSize-1)/batchSize, len(batch), signedTx.Hash().Hex())
 
 		// Wait a short time between transactions to avoid nonce issues
-		time.Sleep(2 * time.Second)
+		time.Sleep(4 * time.Second)
 	}
 
 	return nil
