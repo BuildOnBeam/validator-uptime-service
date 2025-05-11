@@ -2,30 +2,29 @@
 
 A service that automates the submission of validator uptime proofs and manages delegation rewards on the Avalanche network and Beam subnet. This service helps maintain validator rewards by regularly submitting signed uptime proofs and resolving delegation rewards.
 
-## Overview
+## 🧭 Overview
 
-1. **Fetch Validator Uptimes**: Retrieves current validator uptime information from the Avalanche P-Chain
-2. **Generate Uptime Proofs**: Creates and optimizes uptime proof messages by finding the maximum provable uptime
-3. **Signature Aggregation**: Aggregates signatures for uptime proofs through the signature aggregation service
-4. **Submit Proofs**: Submits signed uptime proofs to the staking manager contract
-5. **Resolve Delegation Rewards**: Processes delegation rewards for validators with successful uptime submissions
+1. **Fetch Validator Uptimes**: Retrieves validator uptime data from multiple Avalanche nodes.
+2. **Generate Uptime Proofs**: Signs the best provable uptime from aggregated data.
+3. **Submit Uptime Proofs**: Sends uptime proofs to the Beam network's staking manager contract.
+4. **Resolve Delegation Rewards**: Resolves rewards for delegators only after valid uptime submission.
 
 The service runs a continuous loop with a 24-hour cycle to automate these operations.
 
-## Prerequisites
+## ⚙️ Prerequisites
 
 - Go 1.23.7 or higher
-- Access to an Avalanche node
+- Avalanche nodes (multiple preferred for aggregation)
 - Access to a signature aggregator service
 - Beam network credentials (private key)
 - GraphQL endpoint for delegation data
 
-## Installation
+## 📦 Installation
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/uptime-service.git
-   cd uptime-service
+   git clone https://github.com/BuildOnBeam/validator-uptime-service.git
+   cd validator-uptime-service
    ```
 
 2. Build the service:
@@ -33,13 +32,17 @@ The service runs a continuous loop with a 24-hour cycle to automate these operat
    go build -o uptime-service
    ```
 
-## Configuration
+## 🔧 Configuration
 
-Create a `config.json` file in the same directory as the executable with the following structure:
+Create a `config.json` file in the same directory as the binary with the following structure:
 
 ```json
 {
-  "avalanche_api": "https://api.avax.network",
+  "avalanche_api_list": [
+    "https://api.avax.network",
+    "https://node1.avax.network",
+    "https://node2.avax.network"
+  ],
   "aggregator_url": "https://aggregator.example.com",
   "graphql_endpoint": "https://graph.onbeam.com/subgraphs/name/pos-testnet/graphql",
   "signing_subnet_id": "2JVSBoinj9C2J33VntvzYtVJNZdN2NKiwwKjcumHUWEb5DbBrm",
@@ -54,21 +57,21 @@ Create a `config.json` file in the same directory as the executable with the fol
 }
 ```
 
-### Configuration Parameters
+### 🧾 Config Parameters
 
 | Parameter | Description |
 |-----------|-------------|
-| `avalanche_api` | Endpoint for the Avalanche API |
-| `aggregator_url` | URL of the signature aggregator service |
+| `avalanche_api_list` | List of Avalanche validator API endpoints for uptime queries |
+| `aggregator_url` | Signature aggregator service URL |
 | `graphql_endpoint` | GraphQL endpoint for fetching delegation data |
-| `signing_subnet_id` | ID of the subnet responsible for signing messages |
-| `source_chain_id` | Blockchain ID from which messages originate |
-| `quorum_percentage` | Required percentage for signature quorum (default: 67) |
-| `beam_rpc` | RPC endpoint for the Beam network |
-| `contract_address` | Address of the staking manager contract |
-| `warp_messenger_address` | Address of the warp messenger contract |
-| `private_key` | Private key for transaction signing |
-| `log_level` | Logging level (info/error) |
+| `signing_subnet_id` | Subnet ID used for signing uptime messages |
+| `source_chain_id` | Chain ID from which Warp messages originate |
+| `quorum_percentage` | Required quorum threshold for aggregation |
+| `beam_rpc` | Beam RPC endpoint for transaction submission |
+| `contract_address` | Staking manager contract address |
+| `warp_messenger_address` | Warp messenger contract address |
+| `private_key` | Hex-encoded private key for signing transactions |
+| `log_level` | Log verbosity level (e.g., `info`, `error`) |
 | `network_id` | Network ID (1 for Mainnet, 5 for Fuji Testnet) |
 
 ## Usage
@@ -79,7 +82,7 @@ Run the service with:
 ./uptime-service
 ```
 
-## Technical Architecture
+## 🧱 Technical Architecture
 
 The service implements a modular architecture with the following components:
 
@@ -113,4 +116,14 @@ The service implements a modular architecture with the following components:
                    │ Uptime │
                    │Service │
                    └───────┘
+```
+
+## 📁 Modules
+
+- **`aggregator/`**: Handles uptime message creation and signature aggregation
+- **`contract/`**: Submits proofs to Beam contracts via Warp protocol
+- **`delegation/`**: Fetches delegator data and calls `resolveRewards`
+- **`db/`**: Stores and loads signed uptime messages
+- **`validator/`**: Queries uptime data from multiple Avalanche nodes
+- **`main.go`**: Command runner with `generate`, `submit-uptime-proofs`, and `resolve-rewards` support
 ```

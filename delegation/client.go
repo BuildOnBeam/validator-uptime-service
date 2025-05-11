@@ -91,7 +91,7 @@ func (dc *DelegationClient) GetDelegationsForValidator(validationID string) ([]D
 
 	query := `
 	query GetDelegations($validationID: Bytes!) {
-		delegations(where: {validationID: $validationID}) {
+		delegations(first: 1000, where: {validationID: $validationID, lastRewardedEpoch: "0" }) {
 			id
 			validationID
 		}
