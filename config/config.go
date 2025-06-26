@@ -21,6 +21,7 @@ type Config struct {
 	LogLevel              string   `json:"log_level"`
 	NetworkID             int      `json:"network_id"`
 	DatabaseURL           string   `json:"database_url"`
+	BootstrapValidators   []string `json:"bootstrap_validators"`
 }
 
 func LoadConfig(path string) (*Config, error) {
