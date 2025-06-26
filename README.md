@@ -53,7 +53,11 @@ Create a `config.json` file in the same directory as the binary with the followi
   "warp_messenger_address": "0x0987654321098765432109876543210987654321",
   "private_key": "your-private-key",
   "log_level": "info",
-  "network_id": 1
+  "network_id": 1,
+  "database_url": "postgres://username:password@db-hostname:5432/db-name",
+  "bootstrap_validators": [
+    "bootstrap_validator_validationIds"
+  ]
 }
 ```
 

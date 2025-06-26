@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"uptime-service/aggregator"
-  "uptime-service/commands"
+	"uptime-service/commands"
 	"uptime-service/config"
 	"uptime-service/contract"
 	"uptime-service/db"
@@ -49,9 +49,9 @@ func main() {
 	start := time.Now()
 
 	switch cmd {
-  // main uptimeService commands
-  case "generate-and-submit":
-	  err = generateAndSubmitUptimeProofs(cfg, dbClient)
+	// main uptimeService commands
+	case "generate-and-submit":
+		err = generateAndSubmitUptimeProofs(cfg, dbClient)
 	case "generate":
 		err = generateUptimeProofs(cfg, dbClient)
 	case "submit-uptime-proofs":
@@ -59,23 +59,23 @@ func main() {
 	case "resolve-rewards":
 		err = resolveRewards(cfg, dbClient)
 
-  // supporting error-fix commands
-  case "submit-single":
-    if len(flag.Args()) < 2 {
-      log.Fatal("Usage: go run main.go submit-single <validationID-hex>")
-    }
-    validationIDHex := flag.Arg(1)
-    err = commands.SubmitAndResolveSingleValidator(cfg, dbClient, validationIDHex)
+	// supporting error-fix commands
+	case "submit-single":
+		if len(flag.Args()) < 2 {
+			log.Fatal("Usage: go run main.go submit-single <validationID-hex>")
+		}
+		validationIDHex := flag.Arg(1)
+		err = commands.SubmitAndResolveSingleValidator(cfg, dbClient, validationIDHex)
 
-  case "submit-missing-uptime-proofs":
-    err = commands.SubmitMissingUptimeProofs(cfg, dbClient)  
+	case "submit-missing-uptime-proofs":
+		err = commands.SubmitMissingUptimeProofs(cfg, dbClient)
 
-  case "resolve-delegations":
-    if len(flag.Args()) < 2 {
-      log.Fatal("Usage: go run main.go resolve-delegations <validationID>")
-    }
-    validationID := flag.Arg(1)
-    err = commands.ResolveDelegationsForValidator(cfg, validationID)  
+	case "resolve-delegations":
+		if len(flag.Args()) < 2 {
+			log.Fatal("Usage: go run main.go resolve-delegations <validationID>")
+		}
+		validationID := flag.Arg(1)
+		err = commands.ResolveDelegationsForValidator(cfg, validationID)
 
 	default:
 		log.Fatalf("Unknown command: %s. Must be one of: generate, submit-uptime-proofs, resolve-rewards", cmd)
@@ -333,6 +333,11 @@ func resolveRewards(cfg *config.Config, dbClient *db.DBClient) error {
 func generateAndSubmitUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 	logging.Info("Starting end-to-end uptime proof generation and submission")
 
+	bootstrapMap := make(map[string]bool, len(cfg.BootstrapValidators))
+	for _, id := range cfg.BootstrapValidators {
+		bootstrapMap[id] = true
+	}
+
 	uptimeMap := validator.FetchAggregatedUptimes(cfg.AvalancheAPIList)
 	logging.Infof("Fetched uptime info for %d validationIDs from %d nodes", len(uptimeMap), len(cfg.AvalancheAPIList))
 
@@ -351,6 +356,11 @@ func generateAndSubmitUptimeProofs(cfg *config.Config, dbClient *db.DBClient) er
 	}
 
 	for validationID, uptimeSamples := range uptimeMap {
+		if bootstrapMap[validationID] {
+			logging.Infof("⏩ Skipping bootstrap validator %s", validationID)
+			continue
+		}
+
 		start := time.Now()
 		logging.Infof("==== Processing validator %s ====", validationID)
 		if len(uptimeSamples) == 0 {
