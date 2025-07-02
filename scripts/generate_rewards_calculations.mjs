@@ -7,13 +7,22 @@ import ethers from 'ethers';
 
 dotenv.config();
 
+// Epoch constants
+const EPOCH_DURATION = 2629746; // 1 month
+const CURRENT_EPOCH = 665;
+const EPOCH_START_TIMESTAMP = 1748725092; // Saturday, May 31, 2025 8:58:12 PM
+const UPTIME_REWARDS_THRESHOLD_PERCENTAGE = 80;
+
+// Reward pool constants
+const TOTAL_REWARD_POOL = 16_000_000; // 16,000,000 ATH tokens
+const PRIMARY_REWARD_POOL = TOTAL_REWARD_POOL * 0.2; // 3.2 million tokens
+const SECONDARY_REWARD_POOL = TOTAL_REWARD_POOL * 0.8; // 12.8 million tokens
+
+const SUBGRAPH_ENDPOINT = process.env.SUBGRAPH_URL;
+const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL);
 const DB_CONFIG = {
   connectionString: process.env.DATABASE_URL,
 };
-
-const SUBGRAPH_ENDPOINT = process.env.SUBGRAPH_URL;
-const EPOCH_DURATION = 2629746; // 1 month
-const EPOCH_START_TIMESTAMP = 1743465600; // April 1, 2025
 
 const EXCLUDED_VALIDATION_IDS = [
   '22vKe8ZudEmtaciy5Kvs3k16sojaFKGCtrYGnNyUoqbcXmYXcd',
@@ -58,6 +67,7 @@ const DELEGATIONS_QUERY = gql`
       tokenIDs
       startedAt
       endTime
+      lastRewardedEpoch
     }
   }
 `;
@@ -95,13 +105,6 @@ const iface = new ethers.utils.Interface([
   },
 ]);
 
-const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL);
-
-// Reward pool constants
-const TOTAL_REWARD_POOL = 28_000_000; // 28 million tokens
-const PRIMARY_REWARD_POOL = TOTAL_REWARD_POOL * 0.2; // 5.6 million tokens
-const SECONDARY_REWARD_POOL = TOTAL_REWARD_POOL * 0.8; // 22.4 million tokens
-
 function validationIDToHex(cb58) {
   try {
     const decoded = bs58.decode(cb58);
@@ -117,8 +120,12 @@ function validationIDToHex(cb58) {
   await client.connect();
 
   const { rows } = await client.query(
-    'SELECT validation_id, uptime_seconds FROM uptime_proofs'
+    `SELECT validation_id, uptime_seconds
+    FROM uptime_proofs
+    WHERE updated_at >= to_timestamp($1)`,
+    [EPOCH_START_TIMESTAMP]
   );
+
   const hexMap = new Map();
   for (const row of rows) {
     if (EXCLUDED_VALIDATION_IDS.includes(row.validation_id)) continue;
@@ -163,6 +170,7 @@ function validationIDToHex(cb58) {
     const meta = hexMap.get(v.id);
     if (!meta) continue;
     const validationId = meta.base58;
+    const hexValidationId = v.id; // Hex validation ID
     const uptime = meta.uptimeSeconds;
     const feeBips = parseInt(v.delegationFeeBips);
     const start = parseInt(v.startedAt || '0', 10);
@@ -170,7 +178,9 @@ function validationIDToHex(cb58) {
 
     validatorStatuses.add(v.status);
 
-    console.log(`\n🔧 Processing #${index} - validationId ${validationId}`);
+    console.log(
+      `\n🔧 Processing #${index} - validationId ${validationId} (hex: ${hexValidationId})`
+    );
     console.log(`  → Status: ${v.status}`);
     console.log(`  → Owner: ${v.owner}`);
     console.log(`  → Weight (subgraph): ${v.weight}`);
@@ -216,8 +226,12 @@ function validationIDToHex(cb58) {
     );
     const effective = Math.min(duration, uptime);
     const ratio = Math.min(1, effective / EPOCH_DURATION);
-    let selfBeamWeight = beam * ratio;
-    let selfNodeWeight = nodes.length * ratio;
+    const finalRatio =
+      (effective * 100) / EPOCH_DURATION >= UPTIME_REWARDS_THRESHOLD_PERCENTAGE
+        ? 1
+        : ratio;
+    let selfBeamWeight = beam * finalRatio;
+    let selfNodeWeight = nodes.length * 1e6 * finalRatio; // Scale NFT weight by 1e6
 
     if (ratio === 0) {
       console.warn(`⚠️  Validator ${validationId} has zero effective ratio`);
@@ -232,7 +246,26 @@ function validationIDToHex(cb58) {
       feeRatioSecondary = 0;
     const delegators = [];
 
-    for (const d of dData.delegations) {
+    const filteredDelegations = dData.delegations.filter((d) => {
+      const start = Number(d.startedAt ?? 0);
+      const end = d.endTime ? Number(d.endTime) : null;
+      const delegationStart = Math.max(start, EPOCH_START_TIMESTAMP);
+      const delegationEnd = end ?? EPOCH_START_TIMESTAMP + EPOCH_DURATION;
+      const overlaps =
+        delegationEnd > EPOCH_START_TIMESTAMP &&
+        delegationStart < EPOCH_START_TIMESTAMP + EPOCH_DURATION;
+
+      if (!overlaps) return false;
+
+      // extra guard only for active validators
+      if (v.status === 'Active') {
+        const lastEpoch = Number(d.lastRewardedEpoch ?? 0);
+        return lastEpoch === 0 || lastEpoch < CURRENT_EPOCH;
+      }
+      return true; // removed validator – always include if overlapping
+    });
+
+    for (const d of filteredDelegations) {
       const dStart = parseInt(d.startedAt || '0');
       const dEnd = d.endTime ? parseInt(d.endTime) : null;
       const dDur = Math.max(
@@ -242,6 +275,10 @@ function validationIDToHex(cb58) {
       );
       const dEff = Math.min(dDur, uptime);
       const dRatio = Math.min(1, dEff / EPOCH_DURATION);
+      const dFinalRatio =
+        (dEff * 100) / EPOCH_DURATION >= UPTIME_REWARDS_THRESHOLD_PERCENTAGE
+          ? 1
+          : dRatio;
 
       const isSecondary = Array.isArray(d.tokenIDs) && d.tokenIDs.length > 0;
       if (isSecondary) {
@@ -251,8 +288,8 @@ function validationIDToHex(cb58) {
       }
 
       const rewardWeight = isSecondary
-        ? d.tokenIDs.length * dRatio
-        : parseFloat(d.weight) * dRatio;
+        ? d.tokenIDs.length * 1e6 * dFinalRatio
+        : parseFloat(d.weight) * dFinalRatio;
 
       if (isSecondary && d.tokenIDs.length > 1000) {
         console.warn(
@@ -364,7 +401,7 @@ function validationIDToHex(cb58) {
       feeRatioSecondary: feeRatioSecondary,
       delegators: [
         {
-          id: v.id + '-self-beam',
+          id: hexValidationId + '-self-beam',
           status: v.status,
           startTime: start,
           endTime: end,
@@ -378,7 +415,7 @@ function validationIDToHex(cb58) {
           feeTokens: 0,
         },
         {
-          id: v.id + '-self-nodes',
+          id: hexValidationId + '-self-nodes',
           status: v.status,
           startTime: start,
           endTime: end,
@@ -445,6 +482,7 @@ function validationIDToHex(cb58) {
       commissionRewardsSecondary = 0;
     let feeRatioPrimary = 0,
       feeRatioSecondary = 0;
+    const hexValidationId = validationIDToHex(validator.validationId);
     for (const delegator of validator.delegators) {
       const totalRewardPool =
         delegator.type === 'primary' ? totalPrimary : totalSecondary;
@@ -456,24 +494,30 @@ function validationIDToHex(cb58) {
         totalRewardPool > 0 ? delegator.rewardWeight / totalRewardPool : 0;
       let tokenRewards = delegator.rewardRatio * rewardPool;
       const isSelfStake =
-        delegator.id === validator.validationId + '-self-beam' ||
-        delegator.id === validator.validationId + '-self-nodes';
-      const feeTokens = isSelfStake
-        ? 0
-        : tokenRewards * (validator.commissionRate.replace('%', '') / 100);
+        delegator.id === hexValidationId + '-self-beam' ||
+        delegator.id === hexValidationId + '-self-nodes';
+      const commissionRate =
+        parseFloat(validator.commissionRate.replace('%', '')) / 100;
+      const feeTokens = isSelfStake ? 0 : tokenRewards * commissionRate;
       delegator.feeTokens = feeTokens;
-      delegator.tokenRewards = tokenRewards - feeTokens;
+      delegator.tokenRewards = tokenRewards;
+      if (isSelfStake) {
+        console.log(
+          `✅ Self-stake ${delegator.id} for validator ${validator.validationId} has feeTokens: ${feeTokens}`
+        );
+      }
+      if (isSelfStake && feeTokens !== 0) {
+        console.warn(
+          `⚠️ Non-zero feeTokens for self-stake ${delegator.id}: ${feeTokens}`
+        );
+      }
       if (!isSelfStake) {
         if (delegator.type === 'primary') {
           commissionRewardsPrimary += feeTokens;
-          feeRatioPrimary +=
-            delegator.rewardRatio *
-            (validator.commissionRate.replace('%', '') / 100);
+          feeRatioPrimary += delegator.rewardRatio * commissionRate;
         } else {
           commissionRewardsSecondary += feeTokens;
-          feeRatioSecondary +=
-            delegator.rewardRatio *
-            (validator.commissionRate.replace('%', '') / 100);
+          feeRatioSecondary += delegator.rewardRatio * commissionRate;
         }
       }
     }
@@ -502,6 +546,7 @@ function validationIDToHex(cb58) {
       commissionRewardsSecondary = 0;
     let feeRatioPrimary = 0,
       feeRatioSecondary = 0;
+    const hexValidationId = validationIDToHex(validator.validationId);
     for (const delegator of validator.delegators) {
       const totalRewardPool =
         delegator.type === 'primary' ? totalPrimary : totalSecondary;
@@ -513,24 +558,30 @@ function validationIDToHex(cb58) {
         totalRewardPool > 0 ? delegator.rewardWeight / totalRewardPool : 0;
       let tokenRewards = delegator.rewardRatio * rewardPool;
       const isSelfStake =
-        delegator.id === validator.validationId + '-self-beam' ||
-        delegator.id === validator.validationId + '-self-nodes';
-      const feeTokens = isSelfStake
-        ? 0
-        : tokenRewards * (validator.commissionRate.replace('%', '') / 100);
+        delegator.id === hexValidationId + '-self-beam' ||
+        delegator.id === hexValidationId + '-self-nodes';
+      const commissionRate =
+        parseFloat(validator.commissionRate.replace('%', '')) / 100;
+      const feeTokens = isSelfStake ? 0 : tokenRewards * commissionRate;
       delegator.feeTokens = feeTokens;
-      delegator.tokenRewards = tokenRewards - feeTokens;
+      delegator.tokenRewards = tokenRewards;
+      if (isSelfStake) {
+        console.log(
+          `✅ Self-stake ${delegator.id} for validator ${validator.validationId} has feeTokens: ${feeTokens}`
+        );
+      }
+      if (isSelfStake && feeTokens !== 0) {
+        console.warn(
+          `⚠️ Non-zero feeTokens for self-stake ${delegator.id}: ${feeTokens}`
+        );
+      }
       if (!isSelfStake) {
         if (delegator.type === 'primary') {
           commissionRewardsPrimary += feeTokens;
-          feeRatioPrimary +=
-            delegator.rewardRatio *
-            (validator.commissionRate.replace('%', '') / 100);
+          feeRatioPrimary += delegator.rewardRatio * commissionRate;
         } else {
           commissionRewardsSecondary += feeTokens;
-          feeRatioSecondary +=
-            delegator.rewardRatio *
-            (validator.commissionRate.replace('%', '') / 100);
+          feeRatioSecondary += delegator.rewardRatio * commissionRate;
         }
       }
     }
@@ -568,11 +619,11 @@ function validationIDToHex(cb58) {
 
   // Write updated JSON outputs
   fs.writeFileSync(
-    'epoch_rewards_snapshot.json',
+    'epoch_rewards_snapshot_epoch3.json',
     JSON.stringify({ summary, validators: all }, null, 2)
   );
   fs.writeFileSync(
-    'removed_validators_only.json',
+    'removed_validators_only_epoch3.json',
     JSON.stringify({ summary, validators: removedOnly }, null, 2)
   );
 
@@ -602,8 +653,6 @@ function validationIDToHex(cb58) {
         totalSecondaryTokenRewards += delegator.tokenRewards;
       }
     }
-    totalPrimaryTokenRewards += validator.commissionRewardsPrimary;
-    totalSecondaryTokenRewards += validator.commissionRewardsSecondary;
   }
 
   console.log('\n🧮 Post-Summary Reward Pool Check:');
