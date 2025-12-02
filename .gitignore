@@ -3,6 +3,7 @@
 config.json
 config.json.testnet
 config.json.mainnet
+uptime-signature-aggregator.log
 
 #
 .DS_Store

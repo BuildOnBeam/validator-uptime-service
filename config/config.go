@@ -2,7 +2,7 @@ package config
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
 	"os"
 )
 
@@ -25,23 +25,19 @@ type Config struct {
 }
 
 func LoadConfig(path string) (*Config, error) {
-	file, err := os.Open(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open config: %w", err)
 	}
-	defer file.Close()
+	defer f.Close()
 
-	decoder := json.NewDecoder(file)
 	cfg := &Config{
 		QuorumPercentage: 67,
 		LogLevel:         "info",
-		GraphQLEndpoint:  "https://graph.onbeam.com/subgraphs/name/pos-testnet/graphql",
-		DatabaseURL:      "postgres://postgres:postgres@localhost:5432/uptimeservice?sslmode=disable",
 	}
-	if err := decoder.Decode(cfg); err != nil {
-		return nil, err
+	if err := json.NewDecoder(f).Decode(cfg); err != nil {
+		return nil, fmt.Errorf("decode config: %w", err)
 	}
 
-	log.Printf("Loaded configuration from %s", path)
 	return cfg, nil
 }
