@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-  "uptime-service/aggregator"
+	"uptime-service/aggregator"
 	"uptime-service/config"
 	"uptime-service/contract"
 	"uptime-service/db"
@@ -15,7 +15,7 @@ import (
 	"uptime-service/logging"
 
 	"github.com/ava-labs/avalanchego/ids"
-	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
+	"github.com/ava-labs/avalanchego/vms/platformvm/warp"
 )
 
 func SubmitMissingUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
@@ -31,7 +31,7 @@ func SubmitMissingUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error 
 	hexToProof := map[string]struct {
 		ValidationID  ids.ID
 		UptimeSeconds uint64
-		SignedMessage *avalancheWarp.Message
+		SignedMessage *warp.Message
 	}{}
 	for cb58ID, proof := range proofs {
 		hexID := normalizeHex(proof.ValidationID.Hex())
@@ -94,7 +94,7 @@ func SubmitMissingUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error 
 	if err != nil {
 		return fmt.Errorf("failed to init contract client: %w", err)
 	}
-	aggClient, err := aggregator.NewAggregatorClient(cfg.AggregatorURL, uint32(cfg.NetworkID), cfg.SigningSubnetID, cfg.SourceChainId, cfg.LogLevel)
+	aggClient, err := aggregator.NewAggregatorClient(cfg.AggregatorURL, uint32(cfg.NetworkID), cfg.SigningSubnetID, cfg.SourceChainId, cfg.LogLevel, 67)
 	if err != nil {
 		return fmt.Errorf("failed to init aggregator client: %w", err)
 	}

@@ -8,7 +8,7 @@ import (
 	"uptime-service/logging"
 
 	"github.com/ava-labs/avalanchego/ids"
-	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
+	"github.com/ava-labs/avalanchego/vms/platformvm/warp"
 	_ "github.com/lib/pq"
 )
 
@@ -51,7 +51,7 @@ func (c *DBClient) Close() error {
 }
 
 // StoreUptimeProof stores or updates an uptime proof in the database
-func (c *DBClient) StoreUptimeProof(validationID ids.ID, uptimeSeconds uint64, signedMessage *avalancheWarp.Message) error {
+func (c *DBClient) StoreUptimeProof(validationID ids.ID, uptimeSeconds uint64, signedMessage *warp.Message) error {
 	var existingUptime uint64
 	var existingMsgBytes []byte
 	err := c.db.QueryRow("SELECT uptime_seconds, signed_message FROM uptime_proofs WHERE validation_id = $1", validationID.String()).Scan(&existingUptime, &existingMsgBytes)
@@ -104,7 +104,7 @@ func (c *DBClient) StoreUptimeProof(validationID ids.ID, uptimeSeconds uint64, s
 func (c *DBClient) GetAllUptimeProofs() (map[string]struct {
 	ValidationID  ids.ID
 	UptimeSeconds uint64
-	SignedMessage *avalancheWarp.Message
+	SignedMessage *warp.Message
 }, error) {
 	rows, err := c.db.Query("SELECT validation_id, uptime_seconds, signed_message FROM uptime_proofs")
 	if err != nil {
@@ -115,7 +115,7 @@ func (c *DBClient) GetAllUptimeProofs() (map[string]struct {
 	proofs := make(map[string]struct {
 		ValidationID  ids.ID
 		UptimeSeconds uint64
-		SignedMessage *avalancheWarp.Message
+		SignedMessage *warp.Message
 	})
 
 	for rows.Next() {
@@ -132,7 +132,7 @@ func (c *DBClient) GetAllUptimeProofs() (map[string]struct {
 			return nil, fmt.Errorf("invalid validation ID in database: %w", err)
 		}
 
-		signedMessage, err := avalancheWarp.ParseMessage(signedMessageBytes)
+		signedMessage, err := warp.ParseMessage(signedMessageBytes)
 		if err != nil {
 			return nil, fmt.Errorf("invalid signed message in database: %w", err)
 		}
@@ -140,7 +140,7 @@ func (c *DBClient) GetAllUptimeProofs() (map[string]struct {
 		proofs[validationIDStr] = struct {
 			ValidationID  ids.ID
 			UptimeSeconds uint64
-			SignedMessage *avalancheWarp.Message
+			SignedMessage *warp.Message
 		}{
 			ValidationID:  validationID,
 			UptimeSeconds: uptimeSeconds,

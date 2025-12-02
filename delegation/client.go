@@ -3,7 +3,7 @@ package delegation
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa" // Added hex package
+	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,11 +15,11 @@ import (
 	"uptime-service/logging"
 
 	"github.com/ava-labs/avalanchego/ids"
-	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ava-labs/libevm/accounts/abi"
+	"github.com/ava-labs/libevm/common"
+	"github.com/ava-labs/libevm/core/types"
+	"github.com/ava-labs/libevm/crypto"
+	"github.com/ava-labs/libevm/ethclient"
 )
 
 // GraphQL query struct for the request

@@ -20,7 +20,7 @@ import (
 	"uptime-service/validator"
 
 	"github.com/ava-labs/avalanchego/ids"
-	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
+	"github.com/ava-labs/avalanchego/vms/platformvm/warp"
 )
 
 func main() {
@@ -90,7 +90,7 @@ func main() {
 
 // generateUptimeProofs fetches validator uptimes, generates signatures, and stores them in the db
 func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
-	aggClient, err := aggregator.NewAggregatorClient(cfg.AggregatorURL, uint32(cfg.NetworkID), cfg.SigningSubnetID, cfg.SourceChainId, cfg.LogLevel)
+	aggClient, err := aggregator.NewAggregatorClient(cfg.AggregatorURL, uint32(cfg.NetworkID), cfg.SigningSubnetID, cfg.SourceChainId, cfg.LogLevel, 67)
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func generateUptimeProofs(cfg *config.Config, dbClient *db.DBClient) error {
 		}
 		valID := ids.ID(validationIDBytes)
 
-		var signedMsg *avalancheWarp.Message
+		var signedMsg *warp.Message
 		var finalUptime uint64
 		var attempted bool
 
@@ -341,7 +341,15 @@ func generateAndSubmitUptimeProofs(cfg *config.Config, dbClient *db.DBClient) er
 	uptimeMap := validator.FetchAggregatedUptimes(cfg.AvalancheAPIList)
 	logging.Infof("Fetched uptime info for %d validationIDs from %d nodes", len(uptimeMap), len(cfg.AvalancheAPIList))
 
-	aggClient, err := aggregator.NewAggregatorClient(cfg.AggregatorURL, uint32(cfg.NetworkID), cfg.SigningSubnetID, cfg.SourceChainId, cfg.LogLevel)
+	aggClient, err := aggregator.NewAggregatorClient(
+		cfg.AggregatorURL,
+		uint32(cfg.NetworkID),
+		cfg.SigningSubnetID,
+		cfg.SourceChainId,
+		cfg.LogLevel,
+		67,
+	)
+
 	if err != nil {
 		return fmt.Errorf("failed to init aggregator client: %w", err)
 	}
@@ -371,7 +379,7 @@ func generateAndSubmitUptimeProofs(cfg *config.Config, dbClient *db.DBClient) er
 		sort.Slice(uptimeSamples, func(i, j int) bool { return uptimeSamples[i] > uptimeSamples[j] })
 		logging.Infof("Uptime samples for %s: %v", validationID, uptimeSamples)
 
-		var signedMsg *avalancheWarp.Message
+		var signedMsg *warp.Message
 		var finalUptime uint64
 		var attempted bool
 
