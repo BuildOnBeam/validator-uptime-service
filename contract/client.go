@@ -1,60 +1,78 @@
 package contract
 
 import (
-	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
 	"strings"
 
-	"github.com/ava-labs/avalanche-cli/pkg/contract"
-	"github.com/ava-labs/avalanche-cli/sdk/validatormanager"
+	"github.com/ava-labs/avalanche-tooling-sdk-go/evm"
+	"github.com/ava-labs/avalanche-tooling-sdk-go/evm/contract"
+	"github.com/ava-labs/avalanche-tooling-sdk-go/key"
+	"github.com/ava-labs/avalanche-tooling-sdk-go/validatormanager"
 	"github.com/ava-labs/avalanchego/ids"
-	avalancheWarp "github.com/ava-labs/avalanchego/vms/platformvm/warp"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ava-labs/avalanchego/utils/crypto/secp256k1"
+	"github.com/ava-labs/avalanchego/vms/platformvm/warp"
+	"github.com/ava-labs/libevm/common"
+	"github.com/ava-labs/libevm/crypto"
 )
 
 type ContractClient struct {
 	RPCURL                string
 	StakingManagerAddress string
 	WarpMessengerAddress  string
-	privateKey            *ecdsa.PrivateKey
+	privateKey            *secp256k1.PrivateKey
 	publicAddress         string
 }
 
 func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex string) (*ContractClient, error) {
-	privKey, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
+	pkHex := strings.TrimPrefix(privateKeyHex, "0x")
+
+	raw, err := hex.DecodeString(pkHex)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid hex private key: %w", err)
 	}
 
-	pubAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
+	secpPriv, err := secp256k1.ToPrivateKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse secp256k1 private key: %w", err)
+	}
+
+	ecdsaPriv := secpPriv.ToECDSA()
+	pubAddr := crypto.PubkeyToAddress(ecdsaPriv.PublicKey).Hex()
 
 	return &ContractClient{
 		RPCURL:                rpcURL,
 		StakingManagerAddress: contractAddr,
 		WarpMessengerAddress:  warpMessengerAddr,
-		privateKey:            privKey,
+		privateKey:            secpPriv,
 		publicAddress:         pubAddr,
 	}, nil
 }
 
-func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *avalancheWarp.Message) error {
+func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *warp.Message) error {
 	log.Printf("Submitting uptime proof for validation ID: %s", validationID.Hex())
 
-	// Parse the byte array to a warp.Message
-	signedWarpMsg, err := avalancheWarp.ParseMessage(signedMessage.Bytes())
+	signedWarpMsg, err := warp.ParseMessage(signedMessage.Bytes())
 	if err != nil {
 		return fmt.Errorf("failed to parse signed warp message: %w", err)
 	}
 
+	softKey, err := key.NewSoft(key.WithPrivateKey(c.privateKey))
+	if err != nil {
+		return fmt.Errorf("failed to initialize soft key from in-memory private key: %w", err)
+	}
+
+	signer, err := evm.NewSigner(softKey.KeyChain())
+	if err != nil {
+		return fmt.Errorf("failed to create signer: %w", err)
+	}
+
 	finalTx, _, err := contract.TxToMethodWithWarpMessage(
+		nil,
 		c.RPCURL,
-		false,
-		common.Address{},
-		hex.EncodeToString(c.privateKey.D.Bytes()),
+		signer,
 		common.HexToAddress(c.StakingManagerAddress),
 		signedWarpMsg,
 		big.NewInt(0),

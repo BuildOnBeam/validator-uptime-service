@@ -6,29 +6,31 @@ import (
 )
 
 const (
-	LevelInfo  = "info"
-	LevelError = "error"
+	levelInfo  = "info"
+	levelError = "error"
 )
 
-var currentLevel = LevelInfo
+var currentLevel = levelInfo
 
 func SetLevel(level string) {
 	level = strings.ToLower(level)
-	if level != LevelInfo && level != LevelError {
-		level = LevelInfo
+	switch level {
+	case levelInfo, levelError:
+		currentLevel = level
+	default:
+		currentLevel = levelInfo
 	}
-	currentLevel = level
-	log.Printf("Log level set to %s", currentLevel)
+	log.Printf("log level set to %s", currentLevel)
 }
 
 func Info(msg string) {
-	if currentLevel == LevelInfo {
+	if currentLevel == levelInfo {
 		log.Println("[INFO] " + msg)
 	}
 }
 
 func Infof(format string, args ...interface{}) {
-	if currentLevel == LevelInfo {
+	if currentLevel == levelInfo {
 		log.Printf("[INFO] "+format, args...)
 	}
 }

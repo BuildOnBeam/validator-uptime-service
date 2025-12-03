@@ -1,6 +1,6 @@
 # Validator Uptime Service
 
-A service that automates the submission of validator uptime proofs and manages delegation rewards on the Avalanche network and Beam subnet. This service helps maintain validator rewards by regularly submitting signed uptime proofs and resolving delegation rewards.
+A Go service that automates the generation and submission of validator uptime proofs on the Avalanche network and the Beam L1. It aggregates uptime data, generates signed Warp messages, submits them on-chain, and resolves delegation rewards based on valid uptime proofs.
 
 ## 🧭 Overview
 
@@ -8,33 +8,30 @@ A service that automates the submission of validator uptime proofs and manages d
 2. **Generate Uptime Proofs**: Signs the best provable uptime from aggregated data.
 3. **Submit Uptime Proofs**: Sends uptime proofs to the Beam network's staking manager contract.
 4. **Resolve Delegation Rewards**: Resolves rewards for delegators only after valid uptime submission.
+5. **Submit Missing/Expired Proofs**: Detects gaps in subgraph uptime updates and re-submits proofs if needed.
 
 The service runs a continuous loop with a 24-hour cycle to automate these operations.
 
 ## ⚙️ Prerequisites
 
-- Go 1.23.7 or higher
-- Avalanche nodes (multiple preferred for aggregation)
+- Go 1.24.9 or higher
+- Multiple Avalanche nodes for uptime aggregation
 - Access to a signature aggregator service
 - Beam network credentials (private key)
 - GraphQL endpoint for delegation data
+- PostgreSQL database for storing signed uptime proofs
 
 ## 📦 Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/BuildOnBeam/validator-uptime-service.git
-   cd validator-uptime-service
-   ```
-
-2. Build the service:
-   ```bash
-   go build -o uptime-service
-   ```
+Clone the repository:
+  ```bash
+  git clone https://github.com/BuildOnBeam/validator-uptime-service.git
+  cd validator-uptime-service
+  ```
 
 ## 🔧 Configuration
 
-Create a `config.json` file in the same directory as the binary with the following structure:
+Create a `config.json` file in the root directory with the following structure:
 
 ```json
 {
@@ -43,15 +40,15 @@ Create a `config.json` file in the same directory as the binary with the followi
     "https://node1.avax.network",
     "https://node2.avax.network"
   ],
-  "aggregator_url": "https://aggregator.example.com",
-  "graphql_endpoint": "https://graph.onbeam.com/subgraphs/name/pos-testnet/graphql",
-  "signing_subnet_id": "2JVSBoinj9C2J33VntvzYtVJNZdN2NKiwwKjcumHUWEb5DbBrm",
-  "source_chain_id": "yH8D7ThNJkxmtkuv2jgBa4P1Rn3Qpr4pPr7QYNfcdoS6k6HWp",
+  "aggregator_url": "http://localhost:9090/aggregate-signatures",
+  "graphql_endpoint": "https://graph.onbeam.com/subgraphs/name/pos/graphql",
+  "signing_subnet_id": "eYwmVU67LmSfZb1RwqCMhBYkFyG8ftxn6jAwqzFmxC9STBWLC",
+  "source_chain_id": "2tmrrBo1Lgt1mzzvPSFt73kkQKFas5d1AP88tv9cicwoFp8BSn",
   "quorum_percentage": 67,
-  "beam_rpc": "https://eu.build.onbeam.com/rpc/testnet/your-api-key",
-  "contract_address": "0x1234567890123456789012345678901234567890",
-  "warp_messenger_address": "0x0987654321098765432109876543210987654321",
-  "private_key": "your-private-key",
+  "beam_rpc": "https://eu.build.onbeam.com/rpc/your-api-key",
+  "contract_address": "0x2FD428A5484d113294b44E69Cb9f269abC1d5B54",
+  "warp_messenger_address": "0x0200000000000000000000000000000000000005",
+  "private_key": "0x-your-private-key",
   "log_level": "info",
   "network_id": 1,
   "database_url": "postgres://username:password@db-hostname:5432/db-name",
@@ -77,13 +74,29 @@ Create a `config.json` file in the same directory as the binary with the followi
 | `private_key` | Hex-encoded private key for signing transactions |
 | `log_level` | Log verbosity level (e.g., `info`, `error`) |
 | `network_id` | Network ID (1 for Mainnet, 5 for Fuji Testnet) |
+| `database_url` | PostgreSQL connection string |
+| `bootstrap_validators` | Validators excluded from uptime generation |
 
-## Usage
+## 🚀 Usage
 
 Run the service with:
 
 ```bash
-./uptime-service
+go run main.go <command>
+```
+
+### Available commands:
+
+| Parameter | Description |
+|-----------|-------------|
+| `generate-and-submit` | Full pipeline: fetch → sign → submit → store |
+| `resolve-rewards` | Resolve delegator rewards for all validators |
+| `submit-missing-uptime-proofs` | Re-submit missing or expired proofs |
+
+Example:
+
+```bash
+go run main.go generate-and-submit
 ```
 
 ## 🧱 Technical Architecture
@@ -106,21 +119,38 @@ The service implements a modular architecture with the following components:
 - Manages transaction nonce handling and gas optimization
 - Implements error handling with backoff for failed rewards resolution
 
-### Communication Flow
+### Core Workflow
 ```
-┌────────────┐     ┌───────────────┐     ┌──────────────┐
-│ Avalanche  │     │  Aggregator   │     │    Beam      │
-│  P-Chain   │◄────┤    Service    │◄────┤   Network    │
-└────────────┘     └───────────────┘     └──────────────┘
-       ▲                   ▲                    ▲
-       │                   │                    │
-       └───────────────┬───────────────────────┘
-                       │
-                   ┌───┴───┐
-                   │ Uptime │
-                   │Service │
-                   └───────┘
+┌──────────────────┐
+│ Avalanche Nodes  │
+└───────▲──────────┘
+        │ uptime samples
+        │
+┌───────┴───────────┐      ┌──────────────────────────────┐
+│    validator/     │      │         aggregator/          │
+│ Uptime Fetching   │─────▶│  Signs Warp uptime messages  │
+└───────▲───────────┘      └───────────▲──────────────────┘
+        │                              │ signed proof
+        │                              │
+┌───────┴───────────┐      ┌───────────┴───────────────────┐
+│     service/      │─────▶│  contract/ (Beam RPC client)  │
+│   Orchestrator    │      │     Submits uptime proofs     │
+└───────▲───────────┘      └───────────▲───────────────────┘
+        │                              │
+        │ rewards resolution           │
+┌───────┴───────────┐      ┌───────────┴───────────────────┐
+│   delegation/     │────▶ │       db/ (PostgreSQL)        │
+│ Fetch delegations │      │     Stores proof history      │
+└───────────────────┘      └───────────────────────────────┘
+
 ```
+
+#### Notable Behaviors
+
+- Attempts descending sample order, upswing to 5% higher, and DB fallback when signing uptime proofs.
+- Detects expired Warp messages and automatically re-signs.
+- Tracks bootstrap validators to exclude them from uptime generation.
+- Maintains persistent proof history to avoid duplicate submissions.
 
 ## 📁 Modules
 
@@ -129,5 +159,4 @@ The service implements a modular architecture with the following components:
 - **`delegation/`**: Fetches delegator data and calls `resolveRewards`
 - **`db/`**: Stores and loads signed uptime messages
 - **`validator/`**: Queries uptime data from multiple Avalanche nodes
-- **`main.go`**: Command runner with `generate`, `submit-uptime-proofs`, and `resolve-rewards` support
-```
+- **`main.go`**: Command runner with `generate-and-submit`, and `resolve-rewards` support
