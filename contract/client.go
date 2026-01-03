@@ -3,9 +3,10 @@ package contract
 import (
 	"encoding/hex"
 	"fmt"
-	"log"
 	"math/big"
 	"strings"
+
+	"uptime-service/logging"
 
 	"github.com/ava-labs/avalanche-tooling-sdk-go/evm"
 	"github.com/ava-labs/avalanche-tooling-sdk-go/evm/contract"
@@ -52,7 +53,7 @@ func NewContractClient(rpcURL, contractAddr, warpMessengerAddr, privateKeyHex st
 }
 
 func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *warp.Message) error {
-	log.Printf("Submitting uptime proof for validation ID: %s", validationID.Hex())
+	logging.Infof("Submitting uptime proof for validation ID: %s", validationID.Hex())
 
 	signedWarpMsg, err := warp.ParseMessage(signedMessage.Bytes())
 	if err != nil {
@@ -86,6 +87,6 @@ func (c ContractClient) SubmitUptimeProof(validationID ids.ID, signedMessage *wa
 		return fmt.Errorf("failed to send tx to validator manager: %w", err)
 	}
 
-	log.Printf("SUCCESS: Submitted uptime proof transaction: %s", finalTx.Hash().Hex())
+	logging.Infof("SUCCESS: Submitted uptime proof transaction: %s", finalTx.Hash().Hex())
 	return nil
 }

@@ -1,12 +1,12 @@
 package service
 
 import (
-  "bytes"
+	"bytes"
 	"context"
-  "encoding/json"
+	"encoding/json"
 	"fmt"
 	"math"
-  "net/http"
+	"net/http"
 	"strings"
 	"time"
 
@@ -473,7 +473,7 @@ func SubmitMissingUptimeProofs(
 	if len(failedValidators) > 0 {
 		logging.Error("❌ the following validators failed and were skipped:")
 		for hexID, reason := range failedValidators {
-			fmt.Printf("- %s (CB58: %s): %s\n", hexID, hexToCB58[hexID], reason)
+			logging.Errorf("- %s (CB58: %s): %s\n", hexID, hexToCB58[hexID], reason)
 		}
 	} else {
 		logging.Info("all missing uptime proofs successfully submitted.")
