@@ -1,7 +1,9 @@
 package logging
 
 import (
+	"io"
 	"log"
+	"os"
 	"strings"
 )
 
@@ -12,6 +14,11 @@ const (
 
 var currentLevel = levelInfo
 
+var (
+	infoLogger  = log.New(os.Stdout, "", log.LstdFlags)
+	errorLogger = log.New(os.Stderr, "", log.LstdFlags)
+)
+
 func SetLevel(level string) {
 	level = strings.ToLower(level)
 	switch level {
@@ -20,25 +27,34 @@ func SetLevel(level string) {
 	default:
 		currentLevel = levelInfo
 	}
-	log.Printf("log level set to %s", currentLevel)
+	infoLogger.Printf("log level set to %s", currentLevel)
+}
+
+func SetOutputs(infoOut, errOut io.Writer) {
+	if infoOut != nil {
+		infoLogger.SetOutput(infoOut)
+	}
+	if errOut != nil {
+		errorLogger.SetOutput(errOut)
+	}
 }
 
 func Info(msg string) {
 	if currentLevel == levelInfo {
-		log.Println("[INFO] " + msg)
+		infoLogger.Println("[INFO] " + msg)
 	}
 }
 
 func Infof(format string, args ...interface{}) {
 	if currentLevel == levelInfo {
-		log.Printf("[INFO] "+format, args...)
+		infoLogger.Printf("[INFO] "+format, args...)
 	}
 }
 
 func Error(msg string) {
-	log.Println("[ERROR] " + msg)
+	errorLogger.Println("[ERROR] " + msg)
 }
 
 func Errorf(format string, args ...interface{}) {
-	log.Printf("[ERROR] "+format, args...)
+	errorLogger.Printf("[ERROR] "+format, args...)
 }
