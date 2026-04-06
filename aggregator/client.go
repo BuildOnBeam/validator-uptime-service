@@ -114,6 +114,7 @@ func (c *Client) SubmitAggregateRequest(
 		0,
 		interchain.WithMaxRetries(1),
 		interchain.WithInitialBackoff(1),
+    interchain.WithRequestFormat(interchain.RequestFormatKebabCase),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate signatures: %w", err)
