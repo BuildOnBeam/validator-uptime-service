@@ -3,7 +3,7 @@ module uptime-service
 go 1.24.9
 
 require (
-	github.com/ava-labs/avalanche-tooling-sdk-go v0.3.1-0.20251119175214-1e692807e754
+	github.com/ava-labs/avalanche-tooling-sdk-go v0.4.0
 	github.com/ava-labs/avalanchego v1.14.0-fuji-rc.1
 	github.com/ava-labs/libevm v1.13.15-0.20251016142715-1bccf4f2ddb2
 	github.com/ava-labs/subnet-evm v0.8.0-fuji-rc.2
@@ -109,7 +109,7 @@ require (
 )
 
 replace (
-	github.com/ava-labs/avalanche-tooling-sdk-go => ../avalanche-tooling-sdk-go
+	github.com/ava-labs/avalanche-tooling-sdk-go => github.com/vladzr/avalanche-tooling-sdk-go v0.4.1
 	github.com/ava-labs/libevm => github.com/ava-labs/libevm v1.13.15-0.20251003195629-910e897c54c3
 	github.com/ava-labs/subnet-evm => github.com/ava-labs/subnet-evm v0.8.0-fuji
 	github.com/cockroachdb/pebble => github.com/cockroachdb/pebble v0.0.0-20230928194634-aa077af62593
