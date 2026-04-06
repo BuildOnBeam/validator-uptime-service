@@ -88,8 +88,8 @@ func (c *Client) GetDelegationsForValidator(validationID string) ([]Delegation, 
 			first: 1000,
 			where: {
 				validationID: $validationID,
-				lastRewardedEpoch: 0,
-				startedAt_lte: "1746095346"
+				lastRewardedEpoch_not: 674,
+				startedAt_lte: "1775022552"
 			}
 		) {
 			id
