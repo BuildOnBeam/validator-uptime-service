@@ -1,0 +1,17 @@
+.git
+.gitignore
+.DS_Store
+README.md
+Dockerfile
+.dockerignore
+
+# local config / state never belongs in the image — config.json comes from
+# the AWS Secrets Manager-backed CSI mount at runtime
+config.json
+config.json.testnet
+config.json.mainnet
+.env
+
+# logs and audit dumps
+*.log
+rewards-distribution-audit-logs/
