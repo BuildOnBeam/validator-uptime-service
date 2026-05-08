@@ -41,9 +41,14 @@ func NewClient(
 		level, _ = logging.ToLevel("off")
 	}
 
+	// Console-only logger: route the avalanchego SDK's chatter to stdout
+	// and disable its rotating file writer. The factory always builds a
+	// lumberjack writer that opens <name>.log in CWD on first write — we
+	// don't want or need that in any environment, and in containers it
+	// fails outright against a read-only root filesystem.
 	logger, err := logging.NewFactory(logging.Config{
 		DisplayLevel: level,
-		LogLevel:     level,
+		LogLevel:     logging.Off,
 	}).Make("uptime-signature-aggregator")
 	if err != nil {
 		return nil, fmt.Errorf("create logger: %w", err)
