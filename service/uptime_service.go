@@ -16,6 +16,7 @@ import (
 	"uptime-service/db"
 	"uptime-service/delegation"
 	"uptime-service/logging"
+	"uptime-service/notifier"
 	"uptime-service/validator"
 
 	"github.com/ava-labs/avalanchego/ids"
@@ -30,6 +31,7 @@ type UptimeService struct {
 	aggClient     *aggregator.Client
 	contractCli   *contract.ContractClient
 	delegationCli *delegation.Client
+	slack         *notifier.Slack
 }
 
 func normalizeHex(hexStr string) string {
@@ -76,6 +78,7 @@ func NewUptimeService(cfg *config.Config, store *db.UptimeStore) (*UptimeService
 		aggClient:     agg,
 		contractCli:   contractCli,
 		delegationCli: delegationCli,
+		slack:         notifier.NewSlack(cfg.SlackWebhookURL),
 	}, nil
 }
 
@@ -227,11 +230,28 @@ func parseRefreshRequired(err error) (bool, uint64) {
 	return true, v
 }
 
+// runOutcome tracks per-validator results across a single
+// generate-and-submit run, so we can surface a summary at the end.
+type runOutcome struct {
+	submitted        []string // proof landed on-chain (regardless of DB store result)
+	failedSign       []string // no sample/fallback could be signed by quorum
+	failedSubmit     []string // signed but the staking-manager tx reverted/failed
+	failedStore      []string // submitted on-chain but local DB store failed
+	noSamples        []string // node fleet returned zero uptime samples (often: deactivated)
+	bootstrapSkipped int
+	parseSkipped     int
+}
+
 // GenerateAndSubmitUptimeProofs is the end-to-end path: fetch -> sign -> submit -> store.
 func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error {
 	_ = ctx
 
+	runStart := time.Now()
 	logging.Info("starting end-to-end uptime proof generation and submission")
+
+	if err := s.slack.Post(s.formatStartMessage(runStart)); err != nil {
+		logging.Errorf("slack start notification failed: %v", err)
+	}
 
 	bootstrapMap := make(map[string]bool, len(s.cfg.BootstrapValidators))
 	for _, id := range s.cfg.BootstrapValidators {
@@ -250,9 +270,12 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		return fmt.Errorf("load stored proofs: %w", err)
 	}
 
+	var outcome runOutcome
+
 	for validationID, uptimeSamples := range uptimeMap {
 		if bootstrapMap[validationID] {
 			logging.Infof("⏩ skipping bootstrap validator %s", validationID)
+			outcome.bootstrapSkipped++
 			continue
 		}
 
@@ -261,6 +284,7 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 
 		if len(uptimeSamples) == 0 {
 			logging.Infof("no uptime samples for %s", validationID)
+			outcome.noSamples = append(outcome.noSamples, validationID)
 			continue
 		}
 
@@ -271,22 +295,30 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		)
 		if signedMsg == nil {
 			logging.Errorf("❌ could not get any valid signature for %s", validationID)
+			outcome.failedSign = append(outcome.failedSign, validationID)
 			continue
 		}
 
 		valID, err := ids.FromString(validationID)
 		if err != nil {
 			logging.Errorf("invalid validator ID format for %s: %v", validationID, err)
+			outcome.parseSkipped++
 			continue
 		}
 
 		if err := s.contractCli.SubmitUptimeProof(valID, signedMsg); err != nil {
 			logging.Errorf("❌ contract submission failed for %s: %v", validationID, err)
+			outcome.failedSubmit = append(outcome.failedSubmit, validationID)
 			continue
 		}
 
+		// Proof is on-chain at this point — count it as submitted regardless
+		// of whether the local DB write succeeds.
+		outcome.submitted = append(outcome.submitted, validationID)
+
 		if err := s.storeUptimeProofWithRefresh(valID, finalUptime, signedMsg); err != nil {
 			logging.Errorf("❌ failed to store uptime proof for %s: %v", validationID, err)
+			outcome.failedStore = append(outcome.failedStore, validationID)
 			continue
 		}
 
@@ -294,7 +326,84 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		logging.Infof("finished processing %s in %s", validationID, time.Since(start))
 	}
 
+	if err := s.slack.Post(s.formatSummaryMessage(outcome, time.Since(runStart))); err != nil {
+		logging.Errorf("slack completion notification failed: %v", err)
+	}
+
 	return nil
+}
+
+func (s *UptimeService) networkLabel() string {
+	switch s.cfg.NetworkID {
+	case 1:
+		return "mainnet"
+	case 5:
+		return "fuji"
+	default:
+		return fmt.Sprintf("network-%d", s.cfg.NetworkID)
+	}
+}
+
+func (s *UptimeService) formatStartMessage(runStart time.Time) string {
+	return fmt.Sprintf(
+		":rocket: *Uptime proof run started* — `%s`\nStarted at %s",
+		s.networkLabel(),
+		runStart.UTC().Format(time.RFC3339),
+	)
+}
+
+func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) string {
+	var sb strings.Builder
+
+	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0
+	if hasFailures {
+		sb.WriteString(":warning: ")
+	} else {
+		sb.WriteString(":white_check_mark: ")
+	}
+	fmt.Fprintf(&sb, "*Uptime proof run completed* — `%s` (took %s)\n",
+		s.networkLabel(), dur.Round(time.Second))
+
+	fmt.Fprintf(&sb, "• Submitted on-chain: *%d*\n", len(o.submitted))
+	fmt.Fprintf(&sb, "• Failed to sign (quorum): *%d*\n", len(o.failedSign))
+	fmt.Fprintf(&sb, "• Failed to submit (tx revert): *%d*\n", len(o.failedSubmit))
+	fmt.Fprintf(&sb, "• No uptime samples (likely deactivated): *%d*\n", len(o.noSamples))
+	if o.bootstrapSkipped > 0 {
+		fmt.Fprintf(&sb, "• Skipped bootstrap validators: %d\n", o.bootstrapSkipped)
+	}
+	if len(o.failedStore) > 0 {
+		fmt.Fprintf(&sb, "• Submitted but DB store failed: *%d*\n", len(o.failedStore))
+	}
+	if o.parseSkipped > 0 {
+		fmt.Fprintf(&sb, "• Skipped malformed validation IDs: %d\n", o.parseSkipped)
+	}
+
+	appendIDs(&sb, "Signature failures", o.failedSign)
+	appendIDs(&sb, "Submission failures", o.failedSubmit)
+	appendIDs(&sb, "DB store failures (already on-chain)", o.failedStore)
+	appendIDs(&sb, "No samples (likely deactivated)", o.noSamples)
+
+	return sb.String()
+}
+
+// appendIDs renders a labeled bullet list of validation IDs into sb,
+// capping at 20 entries to keep Slack messages readable.
+func appendIDs(sb *strings.Builder, label string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	const max = 20
+	fmt.Fprintf(sb, "\n*%s:*\n", label)
+	n := len(ids)
+	if n > max {
+		n = max
+	}
+	for _, id := range ids[:n] {
+		fmt.Fprintf(sb, "• `%s`\n", id)
+	}
+	if len(ids) > max {
+		fmt.Fprintf(sb, "_…and %d more_\n", len(ids)-max)
+	}
 }
 
 // Resolves delegations for all the validators.

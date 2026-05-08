@@ -22,6 +22,7 @@ type Config struct {
 	NetworkID             int      `json:"network_id"`
 	DatabaseURL           string   `json:"database_url"`
 	BootstrapValidators   []string `json:"bootstrap_validators"`
+	SlackWebhookURL       string   `json:"slack_webhook_url"`
 }
 
 func LoadConfig(path string) (*Config, error) {
