@@ -245,7 +245,8 @@ func parseRefreshRequired(err error) (bool, uint64) {
 // runOutcome tracks per-validator results across a single
 // generate-and-submit run, so we can surface a summary at the end.
 type runOutcome struct {
-	submitted        []string // proof landed on-chain (regardless of DB store result)
+	submitted        []string // proof recorded on-chain (regardless of DB store result)
+	notRecorded      []string // tx succeeded but the staking manager did not record the uptime
 	failedSign       []string // no sample/fallback could be signed by quorum
 	belowFloor       []string // every node reading was at or below the on-chain uptime
 	failedSubmit     []string // signed but the staking-manager tx reverted/failed
@@ -345,14 +346,23 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 			continue
 		}
 
-		if err := s.contractCli.SubmitUptimeProof(valID, signedMsg); err != nil {
+		recorded, err := s.contractCli.SubmitUptimeProof(valID, signedMsg)
+		if errors.Is(err, contract.ErrUptimeNotRecorded) {
+			logging.Errorf("❌ uptime proof for %s was accepted but not recorded: %v", validationID, err)
+			outcome.notRecorded = append(outcome.notRecorded, validationID)
+			continue
+		}
+		if err != nil {
 			logging.Errorf("❌ contract submission failed for %s: %v", validationID, err)
 			outcome.failedSubmit = append(outcome.failedSubmit, validationID)
 			continue
 		}
+		if recorded != finalUptime {
+			logging.Infof("staking manager recorded uptime %d for %s (submitted %d)", recorded, validationID, finalUptime)
+		}
 
-		// Proof is on-chain at this point — count it as submitted regardless
-		// of whether the local DB write succeeds.
+		// Proof is recorded on-chain at this point — count it as submitted
+		// regardless of whether the local DB write succeeds.
 		outcome.submitted = append(outcome.submitted, validationID)
 
 		if err := s.storeUptimeProofWithRefresh(valID, finalUptime, signedMsg); err != nil {
@@ -395,7 +405,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	var sb strings.Builder
 
 	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0 ||
-		len(o.failedNodes) > 0
+		len(o.failedNodes) > 0 || len(o.notRecorded) > 0
 	if hasFailures {
 		sb.WriteString(":warning: ")
 	} else {
@@ -409,6 +419,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	fmt.Fprintf(&sb, "• Failed to sign (quorum): *%d*\n", len(o.failedSign))
 	fmt.Fprintf(&sb, "• No reading above on-chain uptime: *%d*\n", len(o.belowFloor))
 	fmt.Fprintf(&sb, "• Failed to submit (tx revert): *%d*\n", len(o.failedSubmit))
+	fmt.Fprintf(&sb, "• Submitted but not recorded (no uptime update): *%d*\n", len(o.notRecorded))
 	fmt.Fprintf(&sb, "• No uptime samples (likely deactivated): *%d*\n", len(o.noSamples))
 	if o.bootstrapSkipped > 0 {
 		fmt.Fprintf(&sb, "• Skipped bootstrap validators: %d\n", o.bootstrapSkipped)
@@ -424,6 +435,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	appendIDs(&sb, "Signature failures", o.failedSign)
 	appendIDs(&sb, "No reading above on-chain uptime", o.belowFloor)
 	appendIDs(&sb, "Submission failures", o.failedSubmit)
+	appendIDs(&sb, "Submitted but not recorded", o.notRecorded)
 	appendIDs(&sb, "DB store failures (already on-chain)", o.failedStore)
 	appendIDs(&sb, "No samples (likely deactivated)", o.noSamples)
 
@@ -592,7 +604,7 @@ func SubmitMissingUptimeProofs(
 	for _, hexID := range missingHexIDs {
 		proof := hexToProof[hexID]
 
-		err := contractClient.SubmitUptimeProof(proof.ValidationID, proof.SignedMessage)
+		_, err := contractClient.SubmitUptimeProof(proof.ValidationID, proof.SignedMessage)
 		if err != nil && strings.Contains(err.Error(), "invalid warp message") {
 			logging.Infof("expired warp message for %s — re-signing", hexID)
 			unsignedMsg, err := aggClient.PackValidationUptimeMessage(
@@ -609,7 +621,7 @@ func SubmitMissingUptimeProofs(
 				failedValidators[hexID] = fmt.Sprintf("re-sign submit error: %v", err)
 				continue
 			}
-			err = contractClient.SubmitUptimeProof(proof.ValidationID, signedMsg)
+			_, err = contractClient.SubmitUptimeProof(proof.ValidationID, signedMsg)
 			if err != nil {
 				failedValidators[hexID] = fmt.Sprintf("resubmit error: %v", err)
 				continue
