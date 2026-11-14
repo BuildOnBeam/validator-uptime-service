@@ -238,6 +238,8 @@ type runOutcome struct {
 	failedSubmit     []string // signed but the staking-manager tx reverted/failed
 	failedStore      []string // submitted on-chain but local DB store failed
 	noSamples        []string // node fleet returned zero uptime samples (often: deactivated)
+	failedNodes      []string // API nodes whose uptime fetch failed this run
+	nodesTotal       int
 	bootstrapSkipped int
 	parseSkipped     int
 }
@@ -258,19 +260,32 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		bootstrapMap[id] = true
 	}
 
-	uptimeMap := validator.FetchAggregatedUptimes(s.cfg.AvalancheAPIList)
+	var outcome runOutcome
+
+	nodeResults := validator.FetchNodeUptimes(s.cfg.AvalancheAPIList)
+	outcome.nodesTotal = len(nodeResults)
+	for _, r := range nodeResults {
+		label := validator.NodeLabel(r.Endpoint)
+		if r.Err != nil {
+			logging.Errorf("❌ uptime fetch failed for node %s: %v", label, r.Err)
+			outcome.failedNodes = append(outcome.failedNodes, label)
+			continue
+		}
+		logging.Infof("node %s returned uptime for %d validationIDs", label, len(r.Uptimes))
+	}
+
+	uptimeMap := validator.AggregateUptimes(nodeResults)
 	logging.Infof(
-		"fetched uptime info for %d validationIDs from %d nodes",
+		"fetched uptime info for %d validationIDs from %d/%d nodes",
 		len(uptimeMap),
-		len(s.cfg.AvalancheAPIList),
+		outcome.nodesTotal-len(outcome.failedNodes),
+		outcome.nodesTotal,
 	)
 
 	storedProofs, err := s.store.GetAllUptimeProofs()
 	if err != nil {
 		return fmt.Errorf("load stored proofs: %w", err)
 	}
-
-	var outcome runOutcome
 
 	for validationID, uptimeSamples := range uptimeMap {
 		if bootstrapMap[validationID] {
@@ -355,7 +370,8 @@ func (s *UptimeService) formatStartMessage(runStart time.Time) string {
 func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) string {
 	var sb strings.Builder
 
-	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0
+	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0 ||
+		len(o.failedNodes) > 0
 	if hasFailures {
 		sb.WriteString(":warning: ")
 	} else {
@@ -364,6 +380,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	fmt.Fprintf(&sb, "*Uptime proof run completed* — `%s` (took %s)\n",
 		s.networkLabel(), dur.Round(time.Second))
 
+	fmt.Fprintf(&sb, "• Uptime API nodes responding: *%d/%d*\n", o.nodesTotal-len(o.failedNodes), o.nodesTotal)
 	fmt.Fprintf(&sb, "• Submitted on-chain: *%d*\n", len(o.submitted))
 	fmt.Fprintf(&sb, "• Failed to sign (quorum): *%d*\n", len(o.failedSign))
 	fmt.Fprintf(&sb, "• Failed to submit (tx revert): *%d*\n", len(o.failedSubmit))
@@ -378,6 +395,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 		fmt.Fprintf(&sb, "• Skipped malformed validation IDs: %d\n", o.parseSkipped)
 	}
 
+	appendIDs(&sb, "Uptime API nodes that failed to respond", o.failedNodes)
 	appendIDs(&sb, "Signature failures", o.failedSign)
 	appendIDs(&sb, "Submission failures", o.failedSubmit)
 	appendIDs(&sb, "DB store failures (already on-chain)", o.failedStore)
