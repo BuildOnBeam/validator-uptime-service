@@ -150,6 +150,39 @@ func samplesAbove(samples []uint64, floor uint64) []uint64 {
 	return out
 }
 
+// checkExpectedValidations compares the validations the subgraph reports as
+// active (excluding bootstrap validators) against those the API nodes returned
+// uptime for, recording the expected count and any that are missing.
+func (s *UptimeService) checkExpectedValidations(
+	uptimeMap map[string][]uint64,
+	bootstrapMap map[string]bool,
+	outcome *runOutcome,
+) {
+	active, err := s.subgraphCli.ActiveValidations()
+	if err != nil {
+		logging.Errorf("❌ failed to load active validations from subgraph, skipping coverage check: %v", err)
+		outcome.expected = -1
+		return
+	}
+
+	for _, id := range active {
+		validationID := id.String()
+		if bootstrapMap[validationID] {
+			continue
+		}
+		outcome.expected++
+		if _, ok := uptimeMap[validationID]; !ok {
+			logging.Errorf("❌ active validation %s missing from all uptime API node responses", validationID)
+			outcome.missingFromNodes = append(outcome.missingFromNodes, validationID)
+		}
+	}
+
+	logging.Infof(
+		"expecting proofs for %d active validations; %d missing from node responses",
+		outcome.expected, len(outcome.missingFromNodes),
+	)
+}
+
 // loadUptimeFloors returns, per validation ID, the uptime already recorded
 // on-chain. It reads the latest UptimeUpdated value from the subgraph and falls
 // back to the locally stored proof when the subgraph has no record (or is
@@ -254,6 +287,8 @@ type runOutcome struct {
 	noSamples        []string // node fleet returned zero uptime samples (often: deactivated)
 	failedNodes      []string // API nodes whose uptime fetch failed this run
 	nodesTotal       int
+	missingFromNodes []string // active validations no API node returned uptime for
+	expected         int      // active non-bootstrap validations; -1 if unknown
 	bootstrapSkipped int
 	parseSkipped     int
 }
@@ -306,6 +341,7 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		validationIDs = append(validationIDs, validationID)
 	}
 	floors := s.loadUptimeFloors(validationIDs, storedProofs)
+	s.checkExpectedValidations(uptimeMap, bootstrapMap, &outcome)
 
 	for validationID, uptimeSamples := range uptimeMap {
 		if bootstrapMap[validationID] {
@@ -405,7 +441,8 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	var sb strings.Builder
 
 	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0 ||
-		len(o.failedNodes) > 0 || len(o.notRecorded) > 0
+		len(o.failedNodes) > 0 || len(o.notRecorded) > 0 || len(o.missingFromNodes) > 0 ||
+		o.expected < 0
 	if hasFailures {
 		sb.WriteString(":warning: ")
 	} else {
@@ -414,6 +451,13 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	fmt.Fprintf(&sb, "*Uptime proof run completed* — `%s` (took %s)\n",
 		s.networkLabel(), dur.Round(time.Second))
 
+	if o.expected >= 0 {
+		fmt.Fprintf(&sb, "• Coverage: *%d/%d* active validations recorded on-chain this run\n",
+			len(o.submitted), o.expected)
+		fmt.Fprintf(&sb, "• Active validations missing from node responses: *%d*\n", len(o.missingFromNodes))
+	} else {
+		sb.WriteString("• Coverage: *unknown* (could not load active validations from subgraph)\n")
+	}
 	fmt.Fprintf(&sb, "• Uptime API nodes responding: *%d/%d*\n", o.nodesTotal-len(o.failedNodes), o.nodesTotal)
 	fmt.Fprintf(&sb, "• Submitted on-chain: *%d*\n", len(o.submitted))
 	fmt.Fprintf(&sb, "• Failed to sign (quorum): *%d*\n", len(o.failedSign))
@@ -432,6 +476,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	}
 
 	appendIDs(&sb, "Uptime API nodes that failed to respond", o.failedNodes)
+	appendIDs(&sb, "Active validations missing from node responses", o.missingFromNodes)
 	appendIDs(&sb, "Signature failures", o.failedSign)
 	appendIDs(&sb, "No reading above on-chain uptime", o.belowFloor)
 	appendIDs(&sb, "Submission failures", o.failedSubmit)

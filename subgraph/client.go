@@ -2,6 +2,7 @@ package subgraph
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,6 +85,49 @@ func (c *Client) LatestUptimes(validationIDs []ids.ID) (map[ids.ID]uint64, error
 	}
 
 	return latest, nil
+}
+
+// ActiveValidations returns the IDs of all validations the subgraph reports as
+// Active.
+func (c *Client) ActiveValidations() ([]ids.ID, error) {
+	const pageSize = 1000
+	var (
+		out    []ids.ID
+		lastID = "0x"
+	)
+
+	for {
+		data, err := c.do(fmt.Sprintf(
+			`query { validations(first: %d, orderBy: id, where: {status: "Active", id_gt: "%s"}) { id } }`,
+			pageSize, lastID))
+		if err != nil {
+			return nil, err
+		}
+
+		var page []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(data["validations"], &page); err != nil {
+			return nil, fmt.Errorf("decode validations: %w", err)
+		}
+
+		for _, v := range page {
+			raw, err := hex.DecodeString(strings.TrimPrefix(v.ID, "0x"))
+			if err != nil {
+				return nil, fmt.Errorf("decode validation ID %s: %w", v.ID, err)
+			}
+			id, err := ids.ToID(raw)
+			if err != nil {
+				return nil, fmt.Errorf("parse validation ID %s: %w", v.ID, err)
+			}
+			out = append(out, id)
+		}
+
+		if len(page) < pageSize {
+			return out, nil
+		}
+		lastID = page[len(page)-1].ID
+	}
 }
 
 func (c *Client) do(query string) (map[string]json.RawMessage, error) {
