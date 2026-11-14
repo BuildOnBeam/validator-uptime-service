@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"uptime-service/delegation"
 	"uptime-service/logging"
 	"uptime-service/notifier"
+	"uptime-service/subgraph"
 	"uptime-service/validator"
 
 	"github.com/ava-labs/avalanchego/ids"
@@ -31,6 +33,7 @@ type UptimeService struct {
 	aggClient     *aggregator.Client
 	contractCli   *contract.ContractClient
 	delegationCli *delegation.Client
+	subgraphCli   *subgraph.Client
 	slack         *notifier.Slack
 }
 
@@ -78,18 +81,24 @@ func NewUptimeService(cfg *config.Config, store *db.UptimeStore) (*UptimeService
 		aggClient:     agg,
 		contractCli:   contractCli,
 		delegationCli: delegationCli,
+		subgraphCli:   subgraph.NewClient(cfg.GraphQLEndpoint),
 		slack:         notifier.NewSlack(cfg.SlackWebhookURL),
 	}, nil
 }
 
+// errNoCandidateAboveFloor means no node reported an uptime above the value
+// already recorded on-chain, so there is nothing that could update it.
+var errNoCandidateAboveFloor = errors.New("no uptime sample above the on-chain uptime")
+
 // computeSignedUptime encapsulates the “try highest sample, then ramp up by 5%, then
-// fall back to decreasing/DB-stored value” logic and is reused by both generate-only
-// and generate-and-submit flows.
+// fall back to decreasing” logic. Only values strictly above floor (the uptime
+// already recorded on-chain) are ever signed: the staking manager silently
+// ignores proofs that do not increase the recorded uptime.
 func (s *UptimeService) computeSignedUptime(
 	validationID string,
 	uptimeSamples []uint64,
-	storedProofs map[string]db.UptimeProof,
-) (finalUptime uint64, signedMsg *warp.Message) {
+	floor uint64,
+) (finalUptime uint64, signedMsg *warp.Message, err error) {
 	networkID := uint32(s.cfg.NetworkID)
 
 	trySign := func(uptime uint64) (*warp.Message, error) {
@@ -99,6 +108,15 @@ func (s *UptimeService) computeSignedUptime(
 		}
 		return s.aggClient.SubmitAggregateRequest(unsignedMsg)
 	}
+
+	candidates := samplesAbove(uptimeSamples, floor)
+	if dropped := len(uptimeSamples) - len(candidates); dropped > 0 {
+		logging.Infof("dropped %d sample(s) at or below on-chain uptime %d for %s", dropped, floor, validationID)
+	}
+	if len(candidates) == 0 {
+		return 0, nil, errNoCandidateAboveFloor
+	}
+	uptimeSamples = candidates
 
 	var attempted bool
 
@@ -139,47 +157,90 @@ func (s *UptimeService) computeSignedUptime(
 	}
 
 	if attempted {
-		return finalUptime, signedMsg
+		return finalUptime, signedMsg, nil
 	}
 
-	// All initial samples failed – decrease from the lowest sample and/or stored DB uptime.
+	// All initial samples failed – decrease from the lowest sample, never
+	// going down to the on-chain uptime.
 	current := uptimeSamples[len(uptimeSamples)-1]
-	var storedUptime uint64
-	if proof, exists := storedProofs[validationID]; exists {
-		storedUptime = proof.UptimeSeconds
-	}
 
 	logging.Infof(
-		"all samples failed for %s. decreasing from %d by 5%% until <= stored (%d)",
+		"all samples failed for %s. decreasing from %d by 5%% while above on-chain uptime %d",
 		validationID,
 		current,
-		storedUptime,
+		floor,
 	)
 
 	for {
 		current = uint64(math.Floor(float64(current) * 0.95))
-		if current == 0 {
-			logging.Infof("uptime reached 0 for %s, aborting", validationID)
-			break
-		}
-		if storedUptime > 0 && current <= storedUptime {
-			logging.Infof("trying stored uptime %d for %s", storedUptime, validationID)
-			signed, err := trySign(storedUptime)
-			if err == nil {
-				return storedUptime, signed
-			}
-			logging.Infof("stored uptime signing failed for %s: %v", validationID, err)
+		if current <= floor {
+			logging.Infof("reached on-chain uptime %d for %s, aborting", floor, validationID)
 			break
 		}
 
 		logging.Infof("trying decreased uptime = %d for %s", current, validationID)
 		signed, err := trySign(current)
 		if err == nil {
-			return current, signed
+			return current, signed, nil
 		}
 	}
 
-	return 0, nil
+	return 0, nil, errors.New("quorum did not sign any uptime above the on-chain uptime")
+}
+
+// samplesAbove returns the samples strictly greater than floor, preserving order.
+func samplesAbove(samples []uint64, floor uint64) []uint64 {
+	out := make([]uint64, 0, len(samples))
+	for _, s := range samples {
+		if s > floor {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// loadUptimeFloors returns, per validation ID, the uptime already recorded
+// on-chain. It reads the latest UptimeUpdated value from the subgraph and falls
+// back to the locally stored proof when the subgraph has no record (or is
+// unreachable).
+func (s *UptimeService) loadUptimeFloors(
+	validationIDs []string,
+	storedProofs map[string]db.UptimeProof,
+) map[string]uint64 {
+	parsed := make([]ids.ID, 0, len(validationIDs))
+	for _, v := range validationIDs {
+		id, err := ids.FromString(v)
+		if err != nil {
+			continue
+		}
+		parsed = append(parsed, id)
+	}
+
+	onChain, err := s.subgraphCli.LatestUptimes(parsed)
+	if err != nil {
+		logging.Errorf("❌ failed to load on-chain uptimes from subgraph, falling back to stored proofs: %v", err)
+		onChain = nil
+	}
+
+	floors := make(map[string]uint64, len(validationIDs))
+	var fromChain, fromStore int
+	for _, v := range validationIDs {
+		id, err := ids.FromString(v)
+		if err == nil {
+			if uptime, ok := onChain[id]; ok {
+				floors[v] = uptime
+				fromChain++
+				continue
+			}
+		}
+		if proof, ok := storedProofs[v]; ok {
+			floors[v] = proof.UptimeSeconds
+			fromStore++
+		}
+	}
+
+	logging.Infof("loaded uptime floors: %d from on-chain records, %d from stored proofs", fromChain, fromStore)
+	return floors
 }
 
 func (s *UptimeService) storeUptimeProofWithRefresh(
@@ -235,6 +296,7 @@ func parseRefreshRequired(err error) (bool, uint64) {
 type runOutcome struct {
 	submitted        []string // proof landed on-chain (regardless of DB store result)
 	failedSign       []string // no sample/fallback could be signed by quorum
+	belowFloor       []string // every node reading was at or below the on-chain uptime
 	failedSubmit     []string // signed but the staking-manager tx reverted/failed
 	failedStore      []string // submitted on-chain but local DB store failed
 	noSamples        []string // node fleet returned zero uptime samples (often: deactivated)
@@ -287,6 +349,12 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		return fmt.Errorf("load stored proofs: %w", err)
 	}
 
+	validationIDs := make([]string, 0, len(uptimeMap))
+	for validationID := range uptimeMap {
+		validationIDs = append(validationIDs, validationID)
+	}
+	floors := s.loadUptimeFloors(validationIDs, storedProofs)
+
 	for validationID, uptimeSamples := range uptimeMap {
 		if bootstrapMap[validationID] {
 			logging.Infof("⏩ skipping bootstrap validator %s", validationID)
@@ -303,13 +371,18 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 			continue
 		}
 
-		finalUptime, signedMsg := s.computeSignedUptime(
+		finalUptime, signedMsg, err := s.computeSignedUptime(
 			validationID,
 			uptimeSamples,
-			storedProofs,
+			floors[validationID],
 		)
-		if signedMsg == nil {
-			logging.Errorf("❌ could not get any valid signature for %s", validationID)
+		if errors.Is(err, errNoCandidateAboveFloor) {
+			logging.Errorf("❌ no node reported uptime above on-chain value %d for %s", floors[validationID], validationID)
+			outcome.belowFloor = append(outcome.belowFloor, validationID)
+			continue
+		}
+		if err != nil {
+			logging.Errorf("❌ could not get any valid signature for %s: %v", validationID, err)
 			outcome.failedSign = append(outcome.failedSign, validationID)
 			continue
 		}
@@ -383,6 +456,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	fmt.Fprintf(&sb, "• Uptime API nodes responding: *%d/%d*\n", o.nodesTotal-len(o.failedNodes), o.nodesTotal)
 	fmt.Fprintf(&sb, "• Submitted on-chain: *%d*\n", len(o.submitted))
 	fmt.Fprintf(&sb, "• Failed to sign (quorum): *%d*\n", len(o.failedSign))
+	fmt.Fprintf(&sb, "• No reading above on-chain uptime: *%d*\n", len(o.belowFloor))
 	fmt.Fprintf(&sb, "• Failed to submit (tx revert): *%d*\n", len(o.failedSubmit))
 	fmt.Fprintf(&sb, "• No uptime samples (likely deactivated): *%d*\n", len(o.noSamples))
 	if o.bootstrapSkipped > 0 {
@@ -397,6 +471,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 
 	appendIDs(&sb, "Uptime API nodes that failed to respond", o.failedNodes)
 	appendIDs(&sb, "Signature failures", o.failedSign)
+	appendIDs(&sb, "No reading above on-chain uptime", o.belowFloor)
 	appendIDs(&sb, "Submission failures", o.failedSubmit)
 	appendIDs(&sb, "DB store failures (already on-chain)", o.failedStore)
 	appendIDs(&sb, "No samples (likely deactivated)", o.noSamples)
