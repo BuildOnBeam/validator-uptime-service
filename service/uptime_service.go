@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"uptime-service/logging"
 	"uptime-service/notifier"
 	"uptime-service/subgraph"
+	"uptime-service/uptimesign"
 	"uptime-service/validator"
 
 	"github.com/ava-labs/avalanchego/ids"
@@ -90,10 +90,10 @@ func NewUptimeService(cfg *config.Config, store *db.UptimeStore) (*UptimeService
 // already recorded on-chain, so there is nothing that could update it.
 var errNoCandidateAboveFloor = errors.New("no uptime sample above the on-chain uptime")
 
-// computeSignedUptime encapsulates the “try highest sample, then ramp up by 5%, then
-// fall back to decreasing” logic. Only values strictly above floor (the uptime
-// already recorded on-chain) are ever signed: the staking manager silently
-// ignores proofs that do not increase the recorded uptime.
+// computeSignedUptime finds the highest uptime the quorum will sign for a
+// validator. Only values strictly above floor (the uptime already recorded
+// on-chain) are ever signed: the staking manager silently ignores proofs that
+// do not increase the recorded uptime.
 func (s *UptimeService) computeSignedUptime(
 	validationID string,
 	uptimeSamples []uint64,
@@ -116,76 +116,27 @@ func (s *UptimeService) computeSignedUptime(
 	if len(candidates) == 0 {
 		return 0, nil, errNoCandidateAboveFloor
 	}
-	uptimeSamples = candidates
 
-	var attempted bool
-
-	for idx, sample := range uptimeSamples {
-		logging.Infof("trying sample #%d with uptime = %d for %s", idx+1, sample, validationID)
-
-		signed, err := trySign(sample)
+	attempts := 0
+	sign := func(uptime uint64) (*warp.Message, error) {
+		attempts++
+		signed, err := trySign(uptime)
 		if err != nil {
-			logging.Infof("signing failed at sample %d (%d seconds) for %s: %v", idx+1, sample, validationID, err)
-			continue
+			logging.Infof("signing rejected at uptime = %d for %s", uptime, validationID)
 		}
-
-		attempted = true
-		signedMsg = signed
-		finalUptime = sample
-		logging.Infof("initial signature succeeded with uptime = %d for %s", sample, validationID)
-
-		if idx == 0 {
-			current := sample
-			for {
-				next := uint64(math.Ceil(float64(current) * 1.05))
-				if next <= current {
-					next = current + 1
-				}
-				logging.Infof("trying increased uptime = %d for %s", next, validationID)
-
-				signedNext, err := trySign(next)
-				if err != nil {
-					logging.Infof("failed at increased uptime = %d for %s, keeping %d", next, validationID, current)
-					break
-				}
-				current = next
-				finalUptime = current
-				signedMsg = signedNext
-			}
-		}
-		break
+		return signed, err
 	}
 
-	if attempted {
-		return finalUptime, signedMsg, nil
+	finalUptime, signedMsg, err = uptimesign.Highest(candidates, floor, uptimesign.DefaultTolerance, sign)
+	if err != nil {
+		return 0, nil, err
 	}
-
-	// All initial samples failed – decrease from the lowest sample, never
-	// going down to the on-chain uptime.
-	current := uptimeSamples[len(uptimeSamples)-1]
 
 	logging.Infof(
-		"all samples failed for %s. decreasing from %d by 5%% while above on-chain uptime %d",
-		validationID,
-		current,
-		floor,
+		"quorum signed uptime = %d for %s (on-chain %d, highest sample %d, %d attempts)",
+		finalUptime, validationID, floor, candidates[0], attempts,
 	)
-
-	for {
-		current = uint64(math.Floor(float64(current) * 0.95))
-		if current <= floor {
-			logging.Infof("reached on-chain uptime %d for %s, aborting", floor, validationID)
-			break
-		}
-
-		logging.Infof("trying decreased uptime = %d for %s", current, validationID)
-		signed, err := trySign(current)
-		if err == nil {
-			return current, signed, nil
-		}
-	}
-
-	return 0, nil, errors.New("quorum did not sign any uptime above the on-chain uptime")
+	return finalUptime, signedMsg, nil
 }
 
 // samplesAbove returns the samples strictly greater than floor, preserving order.
