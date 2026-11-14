@@ -27,6 +27,11 @@ import (
 
 const refreshPrefix = "refresh_required:"
 
+// staleProgressThreshold is how far (in seconds) above the on-chain uptime the
+// quorum must sign for a validation to count as progressed when checking API
+// nodes for stale readings.
+const staleProgressThreshold = 3600
+
 type UptimeService struct {
 	cfg           *config.Config
 	store         *db.UptimeStore
@@ -286,6 +291,7 @@ type runOutcome struct {
 	failedStore      []string // submitted on-chain but local DB store failed
 	noSamples        []string // node fleet returned zero uptime samples (often: deactivated)
 	failedNodes      []string // API nodes whose uptime fetch failed this run
+	staleNodes       []string // API nodes whose readings lag the on-chain uptime
 	nodesTotal       int
 	missingFromNodes []string // active validations no API node returned uptime for
 	expected         int      // active non-bootstrap validations; -1 if unknown
@@ -343,6 +349,9 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 	floors := s.loadUptimeFloors(validationIDs, storedProofs)
 	s.checkExpectedValidations(uptimeMap, bootstrapMap, &outcome)
 
+	// Validations the quorum attested meaningful progress for in this run.
+	progressed := make(map[string]bool)
+
 	for validationID, uptimeSamples := range uptimeMap {
 		if bootstrapMap[validationID] {
 			logging.Infof("⏩ skipping bootstrap validator %s", validationID)
@@ -373,6 +382,9 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 			logging.Errorf("❌ could not get any valid signature for %s: %v", validationID, err)
 			outcome.failedSign = append(outcome.failedSign, validationID)
 			continue
+		}
+		if finalUptime >= floors[validationID]+staleProgressThreshold {
+			progressed[validationID] = true
 		}
 
 		valID, err := ids.FromString(validationID)
@@ -411,6 +423,12 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		logging.Infof("finished processing %s in %s", validationID, time.Since(start))
 	}
 
+	for _, n := range validator.FindStaleNodes(nodeResults, floors, progressed) {
+		label := fmt.Sprintf("%s (behind on-chain for %d/%d validations)", validator.NodeLabel(n.Endpoint), n.Behind, n.Compared)
+		logging.Errorf("❌ uptime API node %s", label)
+		outcome.staleNodes = append(outcome.staleNodes, label)
+	}
+
 	if err := s.slack.Post(s.formatSummaryMessage(outcome, time.Since(runStart))); err != nil {
 		logging.Errorf("slack completion notification failed: %v", err)
 	}
@@ -441,8 +459,8 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	var sb strings.Builder
 
 	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0 ||
-		len(o.failedNodes) > 0 || len(o.notRecorded) > 0 || len(o.missingFromNodes) > 0 ||
-		o.expected < 0
+		len(o.failedNodes) > 0 || len(o.staleNodes) > 0 || len(o.notRecorded) > 0 ||
+		len(o.missingFromNodes) > 0 || o.expected < 0
 	if hasFailures {
 		sb.WriteString(":warning: ")
 	} else {
@@ -459,6 +477,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 		sb.WriteString("• Coverage: *unknown* (could not load active validations from subgraph)\n")
 	}
 	fmt.Fprintf(&sb, "• Uptime API nodes responding: *%d/%d*\n", o.nodesTotal-len(o.failedNodes), o.nodesTotal)
+	fmt.Fprintf(&sb, "• Uptime API nodes with stale readings: *%d*\n", len(o.staleNodes))
 	fmt.Fprintf(&sb, "• Submitted on-chain: *%d*\n", len(o.submitted))
 	fmt.Fprintf(&sb, "• Failed to sign (quorum): *%d*\n", len(o.failedSign))
 	fmt.Fprintf(&sb, "• No reading above on-chain uptime: *%d*\n", len(o.belowFloor))
@@ -476,6 +495,7 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	}
 
 	appendIDs(&sb, "Uptime API nodes that failed to respond", o.failedNodes)
+	appendIDs(&sb, "Uptime API nodes with stale readings", o.staleNodes)
 	appendIDs(&sb, "Active validations missing from node responses", o.missingFromNodes)
 	appendIDs(&sb, "Signature failures", o.failedSign)
 	appendIDs(&sb, "No reading above on-chain uptime", o.belowFloor)
