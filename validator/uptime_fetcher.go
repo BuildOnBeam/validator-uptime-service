@@ -5,15 +5,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"sync"
+	"time"
 )
+
+const nodeRequestTimeout = 30 * time.Second
+
+var httpClient = &http.Client{Timeout: nodeRequestTimeout}
 
 type UptimeSample struct {
 	ValidationID  string
 	UptimeSeconds uint64
 	NodeID        string
 	IsActive      bool
+}
+
+// NodeUptimes is a single node's view of current validator uptimes.
+type NodeUptimes struct {
+	Endpoint string
+	Uptimes  map[string]uint64 // validationID -> uptimeSeconds
+	Err      error
 }
 
 type rpcResponse struct {
@@ -36,7 +49,7 @@ func FetchUptimesFromNode(apiBaseURL string) ([]UptimeSample, error) {
 	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"validators.getCurrentValidators","params":{}}`)
 	url := apiBaseURL + "/validators"
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(reqBody))
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("call avalanche validators API (%s): %w", apiBaseURL, err)
 	}
@@ -72,40 +85,61 @@ func FetchUptimesFromNode(apiBaseURL string) ([]UptimeSample, error) {
 	return uptimes, nil
 }
 
-// FetchAggregatedUptimes fetches uptimes from multiple endpoints and aggregates them
-// into a map of validationID -> sorted slice of uptimeSeconds (descending).
-func FetchAggregatedUptimes(endpoints []string) map[string][]uint64 {
-	type safeMap struct {
-		sync.Mutex
-		data map[string][]uint64
-	}
-
-	result := safeMap{data: make(map[string][]uint64)}
+// FetchNodeUptimes queries every endpoint concurrently and returns one result
+// per endpoint, in the same order as endpoints. A failed node is reported via
+// its Err field rather than dropped, so callers can surface it.
+func FetchNodeUptimes(endpoints []string) []NodeUptimes {
+	results := make([]NodeUptimes, len(endpoints))
 	var wg sync.WaitGroup
 
-	for _, endpoint := range endpoints {
+	for i, endpoint := range endpoints {
 		wg.Add(1)
-		go func(api string) {
+		go func(i int, api string) {
 			defer wg.Done()
-			uptimes, err := FetchUptimesFromNode(api)
+			result := NodeUptimes{Endpoint: api}
+			samples, err := FetchUptimesFromNode(api)
 			if err != nil {
-				return // log if you want, but silently ignore one bad node
+				result.Err = err
+			} else {
+				result.Uptimes = make(map[string]uint64, len(samples))
+				for _, s := range samples {
+					result.Uptimes[s.ValidationID] = s.UptimeSeconds
+				}
 			}
-			result.Lock()
-			for _, u := range uptimes {
-				result.data[u.ValidationID] = append(result.data[u.ValidationID], u.UptimeSeconds)
-			}
-			result.Unlock()
-		}(endpoint)
+			results[i] = result
+		}(i, endpoint)
 	}
 
 	wg.Wait()
+	return results
+}
 
-	for id := range result.data {
-		slice := result.data[id]
-		sort.Slice(slice, func(i, j int) bool { return slice[i] > slice[j] })
-		result.data[id] = slice
+// AggregateUptimes merges the successful node results into a map of
+// validationID -> uptimeSeconds samples, sorted descending.
+func AggregateUptimes(results []NodeUptimes) map[string][]uint64 {
+	aggregated := make(map[string][]uint64)
+	for _, r := range results {
+		if r.Err != nil {
+			continue
+		}
+		for id, uptime := range r.Uptimes {
+			aggregated[id] = append(aggregated[id], uptime)
+		}
 	}
 
-	return result.data
+	for id := range aggregated {
+		samples := aggregated[id]
+		sort.Slice(samples, func(i, j int) bool { return samples[i] > samples[j] })
+	}
+
+	return aggregated
+}
+
+// NodeLabel returns a short, human-readable label (host:port) for an endpoint.
+func NodeLabel(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return endpoint
+	}
+	return u.Host
 }

@@ -16,11 +16,15 @@ import (
 
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/libevm/accounts/abi"
+	"github.com/ava-labs/libevm/accounts/abi/bind"
 	"github.com/ava-labs/libevm/common"
 	"github.com/ava-labs/libevm/core/types"
 	"github.com/ava-labs/libevm/crypto"
 	"github.com/ava-labs/libevm/ethclient"
 )
+
+// receiptTimeout bounds how long ResolveRewards waits for each batch to be mined.
+const receiptTimeout = 2 * time.Minute
 
 type GraphQLQuery struct {
 	Query     string                 `json:"query"`
@@ -222,16 +226,33 @@ func (c *Client) ResolveRewards(delegations []Delegation) error {
 			return fmt.Errorf("send tx: %w", err)
 		}
 
+		batchNum := (i / batchSize) + 1
+		batchCount := (len(delegationIDs) + batchSize - 1) / batchSize
 		logging.Infof(
 			"submitted resolveRewards tx (batch %d/%d) with %d delegations, tx hash: %s",
-			(i/batchSize)+1,
-			(len(delegationIDs)+batchSize-1)/batchSize,
-			len(batch),
-			signedTx.Hash().Hex(),
+			batchNum, batchCount, len(batch), signedTx.Hash().Hex(),
 		)
 
-		time.Sleep(4 * time.Second)
+		receipt, err := c.waitMined(signedTx)
+		if err != nil {
+			return fmt.Errorf("wait for resolveRewards tx %s: %w", signedTx.Hash().Hex(), err)
+		}
+		if receipt.Status != types.ReceiptStatusSuccessful {
+			return fmt.Errorf("resolveRewards tx %s reverted (batch %d/%d)", signedTx.Hash().Hex(), batchNum, batchCount)
+		}
+
+		logging.Infof(
+			"confirmed resolveRewards tx %s in block %d (gas used %d, %d events)",
+			signedTx.Hash().Hex(), receipt.BlockNumber.Uint64(), receipt.GasUsed, len(receipt.Logs),
+		)
 	}
 
 	return nil
+}
+
+// waitMined blocks until tx is included, bounded by receiptTimeout.
+func (c *Client) waitMined(tx *types.Transaction) (*types.Receipt, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), receiptTimeout)
+	defer cancel()
+	return bind.WaitMined(ctx, c.EthClient, tx)
 }

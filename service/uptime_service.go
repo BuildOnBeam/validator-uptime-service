@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +17,8 @@ import (
 	"uptime-service/delegation"
 	"uptime-service/logging"
 	"uptime-service/notifier"
+	"uptime-service/subgraph"
+	"uptime-service/uptimesign"
 	"uptime-service/validator"
 
 	"github.com/ava-labs/avalanchego/ids"
@@ -25,12 +27,18 @@ import (
 
 const refreshPrefix = "refresh_required:"
 
+// staleProgressThreshold is how far (in seconds) above the on-chain uptime the
+// quorum must sign for a validation to count as progressed when checking API
+// nodes for stale readings.
+const staleProgressThreshold = 3600
+
 type UptimeService struct {
 	cfg           *config.Config
 	store         *db.UptimeStore
 	aggClient     *aggregator.Client
 	contractCli   *contract.ContractClient
 	delegationCli *delegation.Client
+	subgraphCli   *subgraph.Client
 	slack         *notifier.Slack
 }
 
@@ -78,18 +86,24 @@ func NewUptimeService(cfg *config.Config, store *db.UptimeStore) (*UptimeService
 		aggClient:     agg,
 		contractCli:   contractCli,
 		delegationCli: delegationCli,
+		subgraphCli:   subgraph.NewClient(cfg.GraphQLEndpoint),
 		slack:         notifier.NewSlack(cfg.SlackWebhookURL),
 	}, nil
 }
 
-// computeSignedUptime encapsulates the “try highest sample, then ramp up by 5%, then
-// fall back to decreasing/DB-stored value” logic and is reused by both generate-only
-// and generate-and-submit flows.
+// errNoCandidateAboveFloor means no node reported an uptime above the value
+// already recorded on-chain, so there is nothing that could update it.
+var errNoCandidateAboveFloor = errors.New("no uptime sample above the on-chain uptime")
+
+// computeSignedUptime finds the highest uptime the quorum will sign for a
+// validator. Only values strictly above floor (the uptime already recorded
+// on-chain) are ever signed: the staking manager silently ignores proofs that
+// do not increase the recorded uptime.
 func (s *UptimeService) computeSignedUptime(
 	validationID string,
 	uptimeSamples []uint64,
-	storedProofs map[string]db.UptimeProof,
-) (finalUptime uint64, signedMsg *warp.Message) {
+	floor uint64,
+) (finalUptime uint64, signedMsg *warp.Message, err error) {
 	networkID := uint32(s.cfg.NetworkID)
 
 	trySign := func(uptime uint64) (*warp.Message, error) {
@@ -100,86 +114,122 @@ func (s *UptimeService) computeSignedUptime(
 		return s.aggClient.SubmitAggregateRequest(unsignedMsg)
 	}
 
-	var attempted bool
+	candidates := samplesAbove(uptimeSamples, floor)
+	if dropped := len(uptimeSamples) - len(candidates); dropped > 0 {
+		logging.Infof("dropped %d sample(s) at or below on-chain uptime %d for %s", dropped, floor, validationID)
+	}
+	if len(candidates) == 0 {
+		return 0, nil, errNoCandidateAboveFloor
+	}
 
-	for idx, sample := range uptimeSamples {
-		logging.Infof("trying sample #%d with uptime = %d for %s", idx+1, sample, validationID)
-
-		signed, err := trySign(sample)
+	attempts := 0
+	sign := func(uptime uint64) (*warp.Message, error) {
+		attempts++
+		signed, err := trySign(uptime)
 		if err != nil {
-			logging.Infof("signing failed at sample %d (%d seconds) for %s: %v", idx+1, sample, validationID, err)
-			continue
+			logging.Infof("signing rejected at uptime = %d for %s", uptime, validationID)
 		}
-
-		attempted = true
-		signedMsg = signed
-		finalUptime = sample
-		logging.Infof("initial signature succeeded with uptime = %d for %s", sample, validationID)
-
-		if idx == 0 {
-			current := sample
-			for {
-				next := uint64(math.Ceil(float64(current) * 1.05))
-				if next <= current {
-					next = current + 1
-				}
-				logging.Infof("trying increased uptime = %d for %s", next, validationID)
-
-				signedNext, err := trySign(next)
-				if err != nil {
-					logging.Infof("failed at increased uptime = %d for %s, keeping %d", next, validationID, current)
-					break
-				}
-				current = next
-				finalUptime = current
-				signedMsg = signedNext
-			}
-		}
-		break
+		return signed, err
 	}
 
-	if attempted {
-		return finalUptime, signedMsg
-	}
-
-	// All initial samples failed – decrease from the lowest sample and/or stored DB uptime.
-	current := uptimeSamples[len(uptimeSamples)-1]
-	var storedUptime uint64
-	if proof, exists := storedProofs[validationID]; exists {
-		storedUptime = proof.UptimeSeconds
+	finalUptime, signedMsg, err = uptimesign.Highest(candidates, floor, uptimesign.DefaultTolerance, sign)
+	if err != nil {
+		return 0, nil, err
 	}
 
 	logging.Infof(
-		"all samples failed for %s. decreasing from %d by 5%% until <= stored (%d)",
-		validationID,
-		current,
-		storedUptime,
+		"quorum signed uptime = %d for %s (on-chain %d, highest sample %d, %d attempts)",
+		finalUptime, validationID, floor, candidates[0], attempts,
 	)
+	return finalUptime, signedMsg, nil
+}
 
-	for {
-		current = uint64(math.Floor(float64(current) * 0.95))
-		if current == 0 {
-			logging.Infof("uptime reached 0 for %s, aborting", validationID)
-			break
+// samplesAbove returns the samples strictly greater than floor, preserving order.
+func samplesAbove(samples []uint64, floor uint64) []uint64 {
+	out := make([]uint64, 0, len(samples))
+	for _, s := range samples {
+		if s > floor {
+			out = append(out, s)
 		}
-		if storedUptime > 0 && current <= storedUptime {
-			logging.Infof("trying stored uptime %d for %s", storedUptime, validationID)
-			signed, err := trySign(storedUptime)
-			if err == nil {
-				return storedUptime, signed
-			}
-			logging.Infof("stored uptime signing failed for %s: %v", validationID, err)
-			break
-		}
+	}
+	return out
+}
 
-		logging.Infof("trying decreased uptime = %d for %s", current, validationID)
-		signed, err := trySign(current)
-		if err == nil {
-			return current, signed
+// checkExpectedValidations compares the validations the subgraph reports as
+// active (excluding bootstrap validators) against those the API nodes returned
+// uptime for, recording the expected count and any that are missing.
+func (s *UptimeService) checkExpectedValidations(
+	uptimeMap map[string][]uint64,
+	bootstrapMap map[string]bool,
+	outcome *runOutcome,
+) {
+	active, err := s.subgraphCli.ActiveValidations()
+	if err != nil {
+		logging.Errorf("❌ failed to load active validations from subgraph, skipping coverage check: %v", err)
+		outcome.expected = -1
+		return
+	}
+
+	for _, id := range active {
+		validationID := id.String()
+		if bootstrapMap[validationID] {
+			continue
+		}
+		outcome.expected++
+		if _, ok := uptimeMap[validationID]; !ok {
+			logging.Errorf("❌ active validation %s missing from all uptime API node responses", validationID)
+			outcome.missingFromNodes = append(outcome.missingFromNodes, validationID)
 		}
 	}
 
-	return 0, nil
+	logging.Infof(
+		"expecting proofs for %d active validations; %d missing from node responses",
+		outcome.expected, len(outcome.missingFromNodes),
+	)
+}
+
+// loadUptimeFloors returns, per validation ID, the uptime already recorded
+// on-chain. It reads the latest UptimeUpdated value from the subgraph and falls
+// back to the locally stored proof when the subgraph has no record (or is
+// unreachable).
+func (s *UptimeService) loadUptimeFloors(
+	validationIDs []string,
+	storedProofs map[string]db.UptimeProof,
+) map[string]uint64 {
+	parsed := make([]ids.ID, 0, len(validationIDs))
+	for _, v := range validationIDs {
+		id, err := ids.FromString(v)
+		if err != nil {
+			continue
+		}
+		parsed = append(parsed, id)
+	}
+
+	onChain, err := s.subgraphCli.LatestUptimes(parsed)
+	if err != nil {
+		logging.Errorf("❌ failed to load on-chain uptimes from subgraph, falling back to stored proofs: %v", err)
+		onChain = nil
+	}
+
+	floors := make(map[string]uint64, len(validationIDs))
+	var fromChain, fromStore int
+	for _, v := range validationIDs {
+		id, err := ids.FromString(v)
+		if err == nil {
+			if uptime, ok := onChain[id]; ok {
+				floors[v] = uptime
+				fromChain++
+				continue
+			}
+		}
+		if proof, ok := storedProofs[v]; ok {
+			floors[v] = proof.UptimeSeconds
+			fromStore++
+		}
+	}
+
+	logging.Infof("loaded uptime floors: %d from on-chain records, %d from stored proofs", fromChain, fromStore)
+	return floors
 }
 
 func (s *UptimeService) storeUptimeProofWithRefresh(
@@ -233,11 +283,18 @@ func parseRefreshRequired(err error) (bool, uint64) {
 // runOutcome tracks per-validator results across a single
 // generate-and-submit run, so we can surface a summary at the end.
 type runOutcome struct {
-	submitted        []string // proof landed on-chain (regardless of DB store result)
+	submitted        []string // proof recorded on-chain (regardless of DB store result)
+	notRecorded      []string // tx succeeded but the staking manager did not record the uptime
 	failedSign       []string // no sample/fallback could be signed by quorum
+	belowFloor       []string // every node reading was at or below the on-chain uptime
 	failedSubmit     []string // signed but the staking-manager tx reverted/failed
 	failedStore      []string // submitted on-chain but local DB store failed
 	noSamples        []string // node fleet returned zero uptime samples (often: deactivated)
+	failedNodes      []string // API nodes whose uptime fetch failed this run
+	staleNodes       []string // API nodes whose readings lag the on-chain uptime
+	nodesTotal       int
+	missingFromNodes []string // active validations no API node returned uptime for
+	expected         int      // active non-bootstrap validations; -1 if unknown
 	bootstrapSkipped int
 	parseSkipped     int
 }
@@ -258,11 +315,26 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		bootstrapMap[id] = true
 	}
 
-	uptimeMap := validator.FetchAggregatedUptimes(s.cfg.AvalancheAPIList)
+	var outcome runOutcome
+
+	nodeResults := validator.FetchNodeUptimes(s.cfg.AvalancheAPIList)
+	outcome.nodesTotal = len(nodeResults)
+	for _, r := range nodeResults {
+		label := validator.NodeLabel(r.Endpoint)
+		if r.Err != nil {
+			logging.Errorf("❌ uptime fetch failed for node %s: %v", label, r.Err)
+			outcome.failedNodes = append(outcome.failedNodes, label)
+			continue
+		}
+		logging.Infof("node %s returned uptime for %d validationIDs", label, len(r.Uptimes))
+	}
+
+	uptimeMap := validator.AggregateUptimes(nodeResults)
 	logging.Infof(
-		"fetched uptime info for %d validationIDs from %d nodes",
+		"fetched uptime info for %d validationIDs from %d/%d nodes",
 		len(uptimeMap),
-		len(s.cfg.AvalancheAPIList),
+		outcome.nodesTotal-len(outcome.failedNodes),
+		outcome.nodesTotal,
 	)
 
 	storedProofs, err := s.store.GetAllUptimeProofs()
@@ -270,7 +342,15 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 		return fmt.Errorf("load stored proofs: %w", err)
 	}
 
-	var outcome runOutcome
+	validationIDs := make([]string, 0, len(uptimeMap))
+	for validationID := range uptimeMap {
+		validationIDs = append(validationIDs, validationID)
+	}
+	floors := s.loadUptimeFloors(validationIDs, storedProofs)
+	s.checkExpectedValidations(uptimeMap, bootstrapMap, &outcome)
+
+	// Validations the quorum attested meaningful progress for in this run.
+	progressed := make(map[string]bool)
 
 	for validationID, uptimeSamples := range uptimeMap {
 		if bootstrapMap[validationID] {
@@ -288,15 +368,23 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 			continue
 		}
 
-		finalUptime, signedMsg := s.computeSignedUptime(
+		finalUptime, signedMsg, err := s.computeSignedUptime(
 			validationID,
 			uptimeSamples,
-			storedProofs,
+			floors[validationID],
 		)
-		if signedMsg == nil {
-			logging.Errorf("❌ could not get any valid signature for %s", validationID)
+		if errors.Is(err, errNoCandidateAboveFloor) {
+			logging.Errorf("❌ no node reported uptime above on-chain value %d for %s", floors[validationID], validationID)
+			outcome.belowFloor = append(outcome.belowFloor, validationID)
+			continue
+		}
+		if err != nil {
+			logging.Errorf("❌ could not get any valid signature for %s: %v", validationID, err)
 			outcome.failedSign = append(outcome.failedSign, validationID)
 			continue
+		}
+		if finalUptime >= floors[validationID]+staleProgressThreshold {
+			progressed[validationID] = true
 		}
 
 		valID, err := ids.FromString(validationID)
@@ -306,14 +394,23 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 			continue
 		}
 
-		if err := s.contractCli.SubmitUptimeProof(valID, signedMsg); err != nil {
+		recorded, err := s.contractCli.SubmitUptimeProof(valID, signedMsg)
+		if errors.Is(err, contract.ErrUptimeNotRecorded) {
+			logging.Errorf("❌ uptime proof for %s was accepted but not recorded: %v", validationID, err)
+			outcome.notRecorded = append(outcome.notRecorded, validationID)
+			continue
+		}
+		if err != nil {
 			logging.Errorf("❌ contract submission failed for %s: %v", validationID, err)
 			outcome.failedSubmit = append(outcome.failedSubmit, validationID)
 			continue
 		}
+		if recorded != finalUptime {
+			logging.Infof("staking manager recorded uptime %d for %s (submitted %d)", recorded, validationID, finalUptime)
+		}
 
-		// Proof is on-chain at this point — count it as submitted regardless
-		// of whether the local DB write succeeds.
+		// Proof is recorded on-chain at this point — count it as submitted
+		// regardless of whether the local DB write succeeds.
 		outcome.submitted = append(outcome.submitted, validationID)
 
 		if err := s.storeUptimeProofWithRefresh(valID, finalUptime, signedMsg); err != nil {
@@ -324,6 +421,12 @@ func (s *UptimeService) GenerateAndSubmitUptimeProofs(ctx context.Context) error
 
 		logging.Infof("✅ stored and submitted uptime proof for %s at %d seconds", validationID, finalUptime)
 		logging.Infof("finished processing %s in %s", validationID, time.Since(start))
+	}
+
+	for _, n := range validator.FindStaleNodes(nodeResults, floors, progressed) {
+		label := fmt.Sprintf("%s (behind on-chain for %d/%d validations)", validator.NodeLabel(n.Endpoint), n.Behind, n.Compared)
+		logging.Errorf("❌ uptime API node %s", label)
+		outcome.staleNodes = append(outcome.staleNodes, label)
 	}
 
 	if err := s.slack.Post(s.formatSummaryMessage(outcome, time.Since(runStart))); err != nil {
@@ -355,7 +458,9 @@ func (s *UptimeService) formatStartMessage(runStart time.Time) string {
 func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) string {
 	var sb strings.Builder
 
-	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0
+	hasFailures := len(o.failedSign) > 0 || len(o.failedSubmit) > 0 || len(o.failedStore) > 0 ||
+		len(o.failedNodes) > 0 || len(o.staleNodes) > 0 || len(o.notRecorded) > 0 ||
+		len(o.missingFromNodes) > 0 || o.expected < 0
 	if hasFailures {
 		sb.WriteString(":warning: ")
 	} else {
@@ -364,9 +469,20 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 	fmt.Fprintf(&sb, "*Uptime proof run completed* — `%s` (took %s)\n",
 		s.networkLabel(), dur.Round(time.Second))
 
+	if o.expected >= 0 {
+		fmt.Fprintf(&sb, "• Coverage: *%d/%d* active validations recorded on-chain this run\n",
+			len(o.submitted), o.expected)
+		fmt.Fprintf(&sb, "• Active validations missing from node responses: *%d*\n", len(o.missingFromNodes))
+	} else {
+		sb.WriteString("• Coverage: *unknown* (could not load active validations from subgraph)\n")
+	}
+	fmt.Fprintf(&sb, "• Uptime API nodes responding: *%d/%d*\n", o.nodesTotal-len(o.failedNodes), o.nodesTotal)
+	fmt.Fprintf(&sb, "• Uptime API nodes with stale readings: *%d*\n", len(o.staleNodes))
 	fmt.Fprintf(&sb, "• Submitted on-chain: *%d*\n", len(o.submitted))
 	fmt.Fprintf(&sb, "• Failed to sign (quorum): *%d*\n", len(o.failedSign))
+	fmt.Fprintf(&sb, "• No reading above on-chain uptime: *%d*\n", len(o.belowFloor))
 	fmt.Fprintf(&sb, "• Failed to submit (tx revert): *%d*\n", len(o.failedSubmit))
+	fmt.Fprintf(&sb, "• Submitted but not recorded (no uptime update): *%d*\n", len(o.notRecorded))
 	fmt.Fprintf(&sb, "• No uptime samples (likely deactivated): *%d*\n", len(o.noSamples))
 	if o.bootstrapSkipped > 0 {
 		fmt.Fprintf(&sb, "• Skipped bootstrap validators: %d\n", o.bootstrapSkipped)
@@ -378,8 +494,13 @@ func (s *UptimeService) formatSummaryMessage(o runOutcome, dur time.Duration) st
 		fmt.Fprintf(&sb, "• Skipped malformed validation IDs: %d\n", o.parseSkipped)
 	}
 
+	appendIDs(&sb, "Uptime API nodes that failed to respond", o.failedNodes)
+	appendIDs(&sb, "Uptime API nodes with stale readings", o.staleNodes)
+	appendIDs(&sb, "Active validations missing from node responses", o.missingFromNodes)
 	appendIDs(&sb, "Signature failures", o.failedSign)
+	appendIDs(&sb, "No reading above on-chain uptime", o.belowFloor)
 	appendIDs(&sb, "Submission failures", o.failedSubmit)
+	appendIDs(&sb, "Submitted but not recorded", o.notRecorded)
 	appendIDs(&sb, "DB store failures (already on-chain)", o.failedStore)
 	appendIDs(&sb, "No samples (likely deactivated)", o.noSamples)
 
@@ -548,7 +669,7 @@ func SubmitMissingUptimeProofs(
 	for _, hexID := range missingHexIDs {
 		proof := hexToProof[hexID]
 
-		err := contractClient.SubmitUptimeProof(proof.ValidationID, proof.SignedMessage)
+		_, err := contractClient.SubmitUptimeProof(proof.ValidationID, proof.SignedMessage)
 		if err != nil && strings.Contains(err.Error(), "invalid warp message") {
 			logging.Infof("expired warp message for %s — re-signing", hexID)
 			unsignedMsg, err := aggClient.PackValidationUptimeMessage(
@@ -565,7 +686,7 @@ func SubmitMissingUptimeProofs(
 				failedValidators[hexID] = fmt.Sprintf("re-sign submit error: %v", err)
 				continue
 			}
-			err = contractClient.SubmitUptimeProof(proof.ValidationID, signedMsg)
+			_, err = contractClient.SubmitUptimeProof(proof.ValidationID, signedMsg)
 			if err != nil {
 				failedValidators[hexID] = fmt.Sprintf("resubmit error: %v", err)
 				continue
